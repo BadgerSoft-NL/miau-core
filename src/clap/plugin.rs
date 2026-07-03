@@ -13,6 +13,7 @@ use std::fmt;
 use std::io::Cursor;
 
 use clack_extensions::audio_ports::{AudioPortInfoBuffer, PluginAudioPorts};
+use clack_extensions::params::{ParamInfoBuffer, PluginParams};
 use clack_extensions::state::PluginState;
 use clack_host::entry::{PluginEntry, PluginEntryError};
 use clack_host::prelude::{PluginAudioConfiguration, PluginInstance, PluginInstanceError};
@@ -49,6 +50,22 @@ impl fmt::Display for ClapError {
 }
 
 impl std::error::Error for ClapError {}
+
+/// One parameter of a hosted plugin, as enumerated by [`ClapPlugin::params`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParamDesc {
+    /// Stable CLAP parameter id — use it as the `param` of an
+    /// [`Event::ParamChange`](crate::event::Event::ParamChange) to automate this parameter.
+    pub id: u32,
+    /// Display name, e.g. "Volume".
+    pub name: String,
+    /// Minimum plain value.
+    pub min: f64,
+    /// Maximum plain value.
+    pub max: f64,
+    /// Current plain value (falls back to the default if the plugin cannot report it).
+    pub value: f64,
+}
 
 /// The main-thread half of a hosted CLAP plugin. Owns the `!Send` [`PluginInstance`]; the paired
 /// [`ClapNode`] returned by [`open`](ClapPlugin::open) owns the `Send` audio processor.
@@ -106,6 +123,43 @@ impl ClapPlugin {
             },
             node,
         ))
+    }
+
+    /// Enumerates the plugin's parameters (id, name, range and current value), or an empty list if
+    /// the plugin exposes no params extension.
+    ///
+    /// Parameters are automated through the ordinary event stream (invariant 13): feed the graph an
+    /// [`Event::ParamChange`](crate::event::Event::ParamChange) carrying a [`ParamDesc::id`] and the
+    /// receiving [`ClapNode`] turns it into a CLAP `param_value` event.
+    #[must_use]
+    pub fn params(&mut self) -> Vec<ParamDesc> {
+        let Some(params) = self
+            .instance
+            .plugin_handle()
+            .get_extension::<PluginParams>()
+        else {
+            return Vec::new();
+        };
+        let mut handle = self.instance.plugin_handle();
+        let count = params.count(&mut handle);
+        let mut buffer = ParamInfoBuffer::new();
+        let mut out = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let Some(info) = params.get_info(&mut handle, index, &mut buffer) else {
+                continue;
+            };
+            let id = info.id;
+            out.push(ParamDesc {
+                id: id.get(),
+                name: String::from_utf8_lossy(info.name).into_owned(),
+                min: info.min_value,
+                max: info.max_value,
+                value: params
+                    .get_value(&mut handle, id)
+                    .unwrap_or(info.default_value),
+            });
+        }
+        out
     }
 
     /// Saves the plugin's state to an opaque blob, or `None` if it exposes no state extension.

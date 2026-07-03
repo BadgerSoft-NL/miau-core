@@ -16,7 +16,7 @@ mod plugin;
 
 pub use discovery::{PluginInfo, scan, search_paths};
 pub use node::{ClapNode, Placeholder};
-pub use plugin::{ClapError, ClapPlugin};
+pub use plugin::{ClapError, ClapPlugin, ParamDesc};
 
 #[cfg(test)]
 mod tests;

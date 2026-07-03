@@ -227,6 +227,31 @@ fn clap_node_renders_a_note_and_round_trips_state() {
 }
 
 #[test]
+fn params_enumerate_lists_named_parameters() {
+    let plugins = scan();
+    let Some(info) = pick(&plugins) else {
+        eprintln!("no CLAP plugin installed; skipping params enumeration test");
+        return;
+    };
+    let (mut plugin, _node) = match ClapPlugin::open(info, SR, BLOCK) {
+        Ok(pair) => pair,
+        Err(e) => panic!("open {:?}: {e}", info.name),
+    };
+
+    let params = plugin.params();
+    // Only a known synth is guaranteed to expose parameters; other plugins may legitimately have
+    // none, so assert only for Surge XT.
+    if info.name == "Surge XT" {
+        assert!(!params.is_empty(), "Surge XT exposes parameters");
+        assert!(params.iter().all(|p| p.min <= p.max), "ranges are ordered");
+        assert!(
+            params.iter().any(|p| !p.name.is_empty()),
+            "params are named"
+        );
+    }
+}
+
+#[test]
 fn instantiate_activate_and_round_trip_state() {
     let plugins = scan();
     let Some(info) = pick(&plugins) else {
