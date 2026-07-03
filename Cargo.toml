@@ -11,6 +11,8 @@ keywords = ["audio", "midi", "daw", "clap", "pipewire"]
 categories = ["multimedia::audio"]
 
 [dependencies]
+clack-extensions = { version = "0.1.0", features = ["audio-ports", "clack-host", "note-ports", "params", "state"] }
+clack-host = "0.1.0"
 pipewire = "0.10.0"
 rtrb = "0.3.4"
 
