@@ -20,6 +20,7 @@ pub mod time;
 pub mod dsp;
 pub mod graph;
 pub mod persist;
+pub mod transport;
 
 // The outermost layer — hardware and plugins may know everything.
 pub mod clap;

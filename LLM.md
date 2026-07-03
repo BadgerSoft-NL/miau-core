@@ -34,7 +34,8 @@ That is exactly the ceremony this project rejects.
 miau-core/src/
   time/     — Tick, SamplePos, tempo map, musical↔sample conversion
   event/    — typed Event enum, EventSource trait, note tracker
-  arrange/  — lanes, clips (data structures only; "tracks" do not exist here)
+  arrange/  — lanes, clips, ClipPlayer (EventSource); "tracks" do not exist here
+  transport/— play/stop/locate/loop, block scheduling, tempo-map snapshot swap
   graph/    — Node trait, ports, topology snapshots, schedule, buffer pool
   dsp/      — TimeStretcher trait + default implementations (registry pattern)
   persist/  — Document types, ZIP container, .miauclip exchange format
@@ -43,8 +44,8 @@ miau-core/src/
 ```
 
 Dependency direction is law (invariant 1): `time/` imports from nobody, `event/` and
-`arrange/` only from `time/`; `io/` and `clap/` may know everything. Rust doesn't enforce
-this — you must.
+`arrange/` only from `time/`, `transport/` from `time/`/`event/`/`arrange/`; `io/` and `clap/`
+may know everything. Rust doesn't enforce this — you must.
 
 ## The invariants
 
