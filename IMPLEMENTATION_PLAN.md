@@ -2,6 +2,10 @@
 
 Phased build plan. Read `LLM.md` first; this file assumes you know the architecture.
 
+> **Status: all phases (0–7) are complete** — released as v0.1.0. This file is kept as the
+> record of how the crate was built and what each phase's definition of done was. New work
+> happens as scoped increments on feature branches, not as plan phases.
+
 **Ordering rationale:** pure logic → concurrency → hardware → plugins → persistence.
 Each phase produces something testable without the phases after it; the first audible
 result lands as early as the hardware allows (phase 4). Persistence comes late because it

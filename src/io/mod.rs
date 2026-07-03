@@ -3,7 +3,8 @@
 //! stays external (qpwgraph). Raw MIDI becomes typed events here and nowhere deeper (invariant 6,
 //! see [`parse_midi`]/[`parse_ump`]).
 //!
-//! Phase 4: mono audio output ([`run_audio_output`]) and MIDI input ([`run_midi_input`]).
+//! Currently covered: mono audio output ([`run_audio_output`]) and MIDI input
+//! ([`run_midi_input`]).
 
 use pipewire as pw;
 use pw::spa;
@@ -159,7 +160,8 @@ pub struct MidiControl<'a> {
 }
 
 impl MidiControl<'_> {
-    /// Converts the payload to a typed [`Event`], or `None` for messages the core does not model.
+    /// Converts the payload to a typed [`Event`](crate::event::Event), or `None` for messages
+    /// the core does not model.
     #[must_use]
     pub fn event(&self) -> Option<crate::event::Event> {
         match self.kind {

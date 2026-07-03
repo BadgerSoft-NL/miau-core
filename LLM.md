@@ -32,16 +32,18 @@ That is exactly the ceremony this project rejects.
 
 ```
 miau-core/src/
-  time/     — Tick, SamplePos, tempo map, musical↔sample conversion
-  event/    — typed Event enum, EventSource trait, note tracker
-  arrange/  — lanes, clips, ClipPlayer (EventSource); "tracks" do not exist here
-  transport/— play/stop/locate/loop, block scheduling, tempo-map snapshot swap
+  time      — Tick, SamplePos, tempo map, musical↔sample conversion
+  event     — typed Event enum, EventSource trait, note tracker
+  arrange   — lanes, clips, ClipPlayer (EventSource); "tracks" do not exist here
+  transport — play/stop/locate/loop, block scheduling, tempo-map snapshot swap
   graph/    — Node trait, ports, topology snapshots, schedule, buffer pool
-  dsp/      — TimeStretcher trait + default implementations (registry pattern)
+  dsp       — TimeStretcher trait + default implementations (registry pattern)
   persist/  — Document types, ZIP container, .miauclip exchange format
   io/       — PipeWire client, hardware MIDI
   clap/     — CLAP hosting (ClapNode, discovery, state blobs)
 ```
+
+(Modules without a trailing `/` are single files; the four with it are directories.)
 
 Dependency direction is law (invariant 1): `time/` imports from nobody, `event/` and
 `arrange/` only from `time/`, `transport/` from `time/`/`event/`/`arrange/`; `io/` and `clap/`
@@ -145,7 +147,8 @@ shell/<id>.json     — one entry per shell, opaque to the core, preserved on ro
 
 `.miauclip` is the clip-level cross-shell exchange format: same machinery, one clip
 (`clip.json`: events in ticks, length, loop, stretcher ID + settings) plus optional sample.
-Import re-maps IDs.
+Clips carry no document-relative ids (events are tick-relative, samples content-addressed),
+so import needs no remapping — the target shell just allocates a placement.
 
 Not persisted: playhead, transport runtime state, buffer pools, compiled schedules — all
 derived. A document describes *what the music is*, not what the engine is doing.

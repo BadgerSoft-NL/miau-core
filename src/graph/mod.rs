@@ -3,13 +3,13 @@
 //!
 //! The audio thread iterates the compiled schedule and calls [`Node::process`]; it never
 //! traverses the graph (invariant 12) and never allocates or deallocates (invariant 11 — retired
-//! nodes and snapshots leave via the [garbage chute](Chute), buffers come from a preallocated
+//! nodes and snapshots leave via the garbage chute, buffers come from a preallocated
 //! pool). Topology is validated when edges are added (cycles rejected, invariant 13's typed
-//! ports enforced) and baked into a flat, immutable [`Compiled`] snapshot on [`Graph::commit`].
+//! ports enforced) and baked into a flat, immutable compiled snapshot on [`Graph::commit`].
 //!
-//! Phase-3 note: `commit` runs on the control thread (offline), so it may allocate and it swaps
-//! the active snapshot directly. Phase 4 moves the swap onto the audio thread via a command +
-//! the same retire-queue pattern the transport already uses.
+//! Note: `commit` runs on the control thread (offline), so it may allocate and it swaps
+//! the active snapshot directly. A later revision moves the swap onto the audio thread via a
+//! command + the same retire-queue pattern the transport already uses.
 
 use std::any::Any;
 use std::collections::HashSet;
@@ -464,7 +464,7 @@ impl Graph {
 
     /// Adds an already-boxed node and returns its handle. Same as [`add_node`](Graph::add_node),
     /// but for a trait object whose concrete type isn't known at the call site — e.g. a node built
-    /// by a persistence registry factory (phase 6).
+    /// by a persistence registry factory.
     pub fn add_node_boxed(&mut self, node: Box<dyn Node>) -> NodeKey {
         let counts = node.ports();
         debug_assert!(

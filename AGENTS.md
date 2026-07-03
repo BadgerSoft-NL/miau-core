@@ -5,8 +5,9 @@ Rules of engagement for coding agents (and humans behaving like them).
 ## Before anything else
 
 1. Read `LLM.md` in full. It is the architectural contract; the 15 invariants are law.
-2. Read the current phase in `IMPLEMENTATION_PLAN.md`. Work inside the active phase; don't
-   pull work forward from later phases without being asked.
+2. The phased build in `IMPLEMENTATION_PLAN.md` is complete (v0.1.0); it remains the record
+   of how the crate was built. Work now happens as scoped increments on feature branches —
+   stay inside the increment you were asked for.
 
 ## Workflow
 

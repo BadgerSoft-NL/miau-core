@@ -1,5 +1,7 @@
-//! Plays a 440 Hz sine through the graph out of the speakers. Phase-4 milestone: the engine is
-//! audible. Run with `cargo run --example beep`; press Ctrl-C to stop.
+//! Plays a 440 Hz sine through the graph out of the speakers — the smallest audible use of the
+//! engine. Run with `cargo run --example beep`; press Ctrl-C to stop. Requires a running
+//! PipeWire session (the default on modern Linux desktops); output autoconnects to the
+//! default sink.
 //!
 //! The graph is `Sine → Gain`; PipeWire pulls one block at a time from the process callback,
 //! which drives `graph.process` and copies the gain node's output into the hardware buffer.

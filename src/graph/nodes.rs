@@ -51,7 +51,7 @@ pub struct Gain {
 }
 
 impl Gain {
-    /// A gain node with linear multiplier `gain`.
+    /// A gain node with linear amplitude multiplier `gain` (`1.0` = unity, `0.0` = silence).
     #[must_use]
     pub fn new(gain: f32) -> Self {
         Self { gain }

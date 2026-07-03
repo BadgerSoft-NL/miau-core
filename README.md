@@ -28,7 +28,20 @@ The architecture is a contract, not a suggestion:
 
 ## Status
 
-Early scaffold (phase 0). The module tree exists; the phases fill it in.
+**v0.1.0** — the full planned core is implemented: musical time & tempo maps, typed events,
+transport, arrangement (lanes/clips), the realtime audio graph, PipeWire audio/MIDI I/O, CLAP
+hosting, document persistence (ZIP container + `.miauclip` exchange format) and offline
+time-stretching. 63 tests; realtime paths are lock- and allocation-free per the invariants.
+
+## Examples
+
+Three examples double as a guided tour (all need a running PipeWire session):
+
+- `cargo run --example beep` — a sine through the graph to the speakers; no setup needed.
+- `cargo run --example midi_monitor` — typed events from a hardware MIDI keyboard; route your
+  keyboard to "miau midi monitor" (e.g. in qpwgraph).
+- `cargo run --example clap_synth` — play a CLAP synth (default: Surge XT) live via MIDI, with
+  a parameter-automation LFO; needs a CLAP plugin in `~/.clap` or `/usr/lib/clap`.
 
 ## License
 

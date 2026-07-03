@@ -1,6 +1,6 @@
 //! Live instrument host: a hardware MIDI keyboard plays a CLAP synth (e.g. Surge XT) out of the
 //! speakers, while an automation-style `ParamChange` LFO audibly sweeps one of the plugin's
-//! parameters. Phase-5 milestone: miau-core is an instrument host.
+//! parameters. Needs at least one CLAP plugin installed in `~/.clap` or `/usr/lib/clap`.
 //!
 //! Usage:
 //!   cargo run --example clap_synth -- [plugin-substring] [param-id]

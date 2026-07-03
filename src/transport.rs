@@ -5,10 +5,10 @@
 //! audio → control via atomics with a single writer, the audio-side [`Transport::process_block`]
 //! (invariants 2 & 3). Shared data (the tempo map) is an immutable `Arc` snapshot swapped
 //! atomically; the retired snapshot is handed back over a return queue rather than dropped on
-//! the audio thread (invariants 9 & 11 — a miniature of phase 3's garbage chute).
+//! the audio thread (invariants 9 & 11 — a miniature of the graph's garbage chute).
 //!
 //! The transport only *schedules*: it emits [`BlockStep`]s. It never pulls events or tracks
-//! notes itself — a driver (the graph, in phase 3) interprets the steps, asking the
+//! notes itself — a driver (the graph) interprets the steps, asking the
 //! [`EventSource`](crate::event::EventSource)s for each range and flushing the
 //! [`NoteTracker`](crate::event::NoteTracker) on each [`BlockStep::Flush`] (invariant 8).
 
@@ -370,7 +370,7 @@ mod tests {
     }
 
     /// Drives one block: interprets the transport's steps against a clip player + note tracker,
-    /// exactly as the phase-3 graph will. Returns this block's emitted events.
+    /// exactly as the graph driver does. Returns this block's emitted events.
     fn drive(
         transport: &mut Transport,
         player: &mut ClipPlayer,

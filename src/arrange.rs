@@ -49,8 +49,8 @@ pub struct SampleRef {
 ///
 /// Over its `length` a clip plays once; when `looping` is set the `[0, length)` content tiles
 /// across the placement's span (see [`Placement`]). A clip may also reference an audio sample
-/// and a time-stretch to apply to it — both carried for persistence and honored by later
-/// phases, ignored by the event-only [`ClipPlayer`] today.
+/// and a time-stretch to apply to it — both carried for persistence but ignored by the
+/// event-only [`ClipPlayer`]; a sample-playback node honors them later.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Clip {
     length: Tick,
@@ -111,7 +111,8 @@ impl Clip {
         self.looping
     }
 
-    /// The clip's events, sorted by tick.
+    /// The clip's events, sorted by tick. Events at or past `length` are retained (and
+    /// persisted) but never played.
     #[must_use]
     pub fn events(&self) -> &[(Tick, Event)] {
         &self.events
@@ -226,7 +227,7 @@ impl ClipPlayer {
     }
 
     /// Swaps the lane snapshot. The previous `Arc` is dropped by the caller — do this off the
-    /// audio thread, or route the old snapshot through the garbage chute (phase 3).
+    /// audio thread, or route the old snapshot through the graph's garbage chute.
     pub fn set_lane(&mut self, lane: Arc<Lane>) {
         self.lane = lane;
     }
