@@ -16,6 +16,10 @@ fn main() -> Result<(), Error> {
 
     run_midi_input("miau midi monitor", |control| match control.event() {
         Some(event) => println!("@{:<5} {event:?}", control.offset),
+        // Skip the steady stream of MIDI clock / active-sensing (system real-time, >= 0xF8);
+        // grooveboxes like the Circuit send it continuously. Show anything else the core does
+        // not model yet as raw bytes.
+        None if control.bytes.first().is_some_and(|&b| b >= 0xF8) => {}
         None => println!(
             "@{:<5} [raw {:?}] {:02x?}",
             control.offset, control.kind, control.bytes
