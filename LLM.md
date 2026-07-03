@@ -115,9 +115,10 @@ a new one and swaps it atomically.
 - **Ports**: exactly two types, `AudioPort` (f32 buffer per block) and `EventPort`
   (timestamped messages). Don't confuse the three layers: port type (2 kinds, routing law),
   event variant (growing enum, node behavior), track nature (emergent shell label).
-- **Registry pattern**: `engine.register_stretcher("paulstretch", Box::new(…))`. Compile-time
-  extension, not runtime plugins. Clips reference implementations by string ID; unknown IDs
-  fall back with a warning.
+- **Registry pattern**: `StretcherRegistry::register("paulstretch", factory)` (and the parallel
+  `NodeRegistry` for graph nodes). Compile-time extension, not runtime plugins. Clips reference
+  implementations by string ID; unknown IDs fall back with a warning (`dsp/` falls back to
+  `repitch`, `persist/` to a placeholder node).
 - **CLAP**: threading model adopted wholesale. `ClapNode` has two faces — a realtime part in
   the node arena (the `Send` audio processor) and a main-thread part (GUI, state, parameter
   enumeration) — joined per

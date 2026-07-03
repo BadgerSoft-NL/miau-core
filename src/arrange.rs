@@ -4,8 +4,8 @@
 //! Pure data + logic; uses [`crate::time`] and [`crate::event`] but nothing above them
 //! (invariant 1). "Tracks" do not exist here — a track is a shell-level coupling of a lane and
 //! a node chain (invariant 13). Clips loop, carry an optional time-stretch reference (invariant
-//! 7, applied in phase 7) and an optional sample reference; this is the shape `persist/`
-//! serializes (design log note 10).
+//! 7, resolved through [`crate::dsp`]) and an optional sample reference; this is the shape
+//! `persist/` serializes (design log note 10).
 
 use std::sync::Arc;
 
@@ -19,7 +19,8 @@ use crate::time::{Tick, TickRange};
 ///
 /// `id` selects a stretcher registered in [`crate::dsp`] (invariant 7 — unknown ids fall back
 /// with a warning, they never crash). `settings` is arbitrary JSON the core carries but never
-/// interprets; `dsp/` reads it in phase 7. Storing it as [`Value`] keeps a document readable
+/// interprets; [`crate::dsp::StretcherRegistry::resolve`] hands it to the stretcher's factory.
+/// Storing it as [`Value`] keeps a document readable
 /// (design log note 10) without `arrange/` having to understand any stretcher's parameters.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Stretch {
