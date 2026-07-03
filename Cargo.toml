@@ -1,0 +1,21 @@
+[package]
+name = "miau-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "A DAW-grade audio/MIDI engine in Rust: time, events, arrangement, routing, CLAP hosting, PipeWire I/O and persistence."
+repository = "https://github.com/jetse/miau-core"
+readme = "README.md"
+keywords = ["audio", "midi", "daw", "clap", "pipewire"]
+categories = ["multimedia::audio"]
+
+[dependencies]
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+
+[lints.clippy]
+# Realtime-safety leans on being explicit; keep the whole clippy bar high from day one.
+all = { level = "warn", priority = -1 }

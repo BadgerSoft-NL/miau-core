@@ -1,0 +1,4 @@
+# Clippy tuning. The lint levels themselves live in Cargo.toml's [lints.clippy];
+# this file configures the lints that take parameters.
+msrv = "1.85.0"
+avoid-breaking-exported-api = false

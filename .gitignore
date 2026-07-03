@@ -1,0 +1,14 @@
+# Build output
+/target
+
+# Rustdoc / coverage scratch
+/doc
+
+# Editor and OS noise
+*.swp
+*~
+.DS_Store
+
+# Cargo.lock is committed for binaries/examples but not required for a library.
+# We keep it out of the way here since miau-core ships as a library crate.
+Cargo.lock
