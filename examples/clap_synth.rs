@@ -92,6 +92,25 @@ fn matches(query: &str, info: &PluginInfo) -> bool {
     info.name.to_lowercase().contains(&q) || info.id.to_lowercase().contains(&q)
 }
 
+/// Selects the plugin to host from all substring matches, preferring an instrument: an exact
+/// (case-insensitive) name match wins, then any match whose name doesn't look like an effect (so a
+/// bare "surge" picks the "Surge XT" synth over "Surge XT Effects"), then the first match. A
+/// `ClapNode` exposes no audio *input*, so an effect plugin would only ever render silence here.
+fn select<'a>(plugins: &'a [PluginInfo], query: &str) -> Option<&'a PluginInfo> {
+    let q = query.to_lowercase();
+    let matched: Vec<&PluginInfo> = plugins.iter().filter(|p| matches(query, p)).collect();
+    let looks_like_effect = |p: &PluginInfo| {
+        let n = p.name.to_lowercase();
+        n.contains("effect") || n.contains(" fx")
+    };
+    matched
+        .iter()
+        .find(|p| p.name.to_lowercase() == q)
+        .or_else(|| matched.iter().find(|p| !looks_like_effect(p)))
+        .or_else(|| matched.first())
+        .copied()
+}
+
 /// Picks a default parameter to sweep: the first whose name hints at pitch/timbre (so the ear can
 /// hear it move), else the first parameter of all.
 fn default_param(params: &[ParamDesc]) -> Option<&ParamDesc> {
@@ -111,7 +130,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         eprintln!("no CLAP plugins found in ~/.clap or /usr/lib/clap");
         return Ok(());
     }
-    let Some(info) = plugins.iter().find(|p| matches(query, p)) else {
+    let Some(info) = select(&plugins, query) else {
         eprintln!("no plugin matching {query:?}. Discovered:");
         for p in &plugins {
             eprintln!("  {}  ({})", p.name, p.id);
