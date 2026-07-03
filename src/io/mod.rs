@@ -131,6 +131,12 @@ where
 // MIDI input.
 // ---------------------------------------------------------------------------------------------
 
+// Stable `spa_control_type` ABI values. Hardcoded rather than taken from `pw::spa::sys`, because
+// `SPA_CONTROL_UMP` only exists in newer libspa headers (PipeWire 1.x) and CI builds against an
+// older `libspa-0.2-dev`. The values themselves are fixed by the SPA ABI.
+const SPA_CONTROL_MIDI: u32 = 2; // legacy raw MIDI 1.0 bytes
+const SPA_CONTROL_UMP: u32 = 4; // MIDI 2.0 Universal MIDI Packet
+
 /// How a MIDI control's payload is encoded.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MidiKind {
@@ -193,9 +199,9 @@ fn for_each_control(pod: &[u8], mut f: impl FnMut(&MidiControl)) {
         if value_start + value_size > end {
             break;
         }
-        let kind = if ctype == pw::spa::sys::SPA_CONTROL_Midi {
+        let kind = if ctype == SPA_CONTROL_MIDI {
             Some(MidiKind::Legacy)
-        } else if ctype == pw::spa::sys::SPA_CONTROL_UMP {
+        } else if ctype == SPA_CONTROL_UMP {
             Some(MidiKind::Ump)
         } else {
             None
@@ -323,7 +329,7 @@ mod tests {
     #[test]
     fn walks_a_ump_sequence_into_a_typed_event() {
         let word = 0x2090_3C64_u32.to_ne_bytes(); // note-on ch0 key60 vel100
-        let pod = sequence(pw::spa::sys::SPA_CONTROL_UMP, &word);
+        let pod = sequence(SPA_CONTROL_UMP, &word);
 
         let mut events = Vec::new();
         for_each_control(&pod, |control| {
@@ -343,7 +349,7 @@ mod tests {
 
     #[test]
     fn walks_a_legacy_midi_sequence() {
-        let pod = sequence(pw::spa::sys::SPA_CONTROL_Midi, &[0xB0, 7, 127]);
+        let pod = sequence(SPA_CONTROL_MIDI, &[0xB0, 7, 127]);
         let mut events = Vec::new();
         for_each_control(&pod, |control| events.push((control.kind, control.event())));
         assert_eq!(
