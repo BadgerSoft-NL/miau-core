@@ -119,8 +119,10 @@ a new one and swaps it atomically.
   extension, not runtime plugins. Clips reference implementations by string ID; unknown IDs
   fall back with a warning.
 - **CLAP**: threading model adopted wholesale. `ClapNode` has two faces — a realtime part in
-  the node arena and a main-thread part (GUI, state) — joined per instance, talking over the
-  existing command channels. Parameters are just `ParamChange` events, translated sample-
+  the node arena (the `Send` audio processor) and a main-thread part (GUI, state) — joined per
+  instance by a shared plugin handle. Instantiation/activation happen on the main thread; the
+  realtime face is retired through the garbage chute, where the plugin is deactivated off the
+  audio thread (invariant 11). Parameters are just `ParamChange` events, translated sample-
   accurately. Plugin state is an opaque blob; a missing plugin becomes a **placeholder node**
   that preserves the blob and all connections.
 

@@ -5,13 +5,18 @@
 //! the main thread; a plugin enters the graph snapshot only once activated. Deactivation exits
 //! via the garbage chute (invariant 11).
 //!
-//! Phase 5 — in progress. Landed so far: discovery + the miau host handlers. The `ClapNode`
-//! graph integration, event/param translation and the placeholder node follow.
+//! Phase 5 — in progress. Landed so far: discovery, the miau host handlers, the [`ClapNode`] graph
+//! integration with event/param translation, the main-thread [`ClapPlugin`] handle, and the
+//! [`Placeholder`] for missing plugins. The live `clap_synth` example follows (phase 5c).
 
 mod discovery;
 mod host;
+mod node;
+mod plugin;
 
 pub use discovery::{PluginInfo, scan, search_paths};
+pub use node::{ClapNode, Placeholder};
+pub use plugin::{ClapError, ClapPlugin};
 
 #[cfg(test)]
 mod tests;

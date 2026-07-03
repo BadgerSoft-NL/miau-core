@@ -4,10 +4,6 @@
 //! `Send + Sync`), and its request callbacks are no-ops for now — restart/process/callback
 //! requests are handled by the engine's own scheduling.
 
-// These handlers are consumed by the gated instantiation test now and by `ClapNode` in the next
-// phase-5 slice; until the node lands they are unused in a plain (non-test) library build.
-#![allow(dead_code)]
-
 use clack_host::prelude::{HostHandlers, HostInfo, SharedHandler};
 
 /// Shared host state, visible from every thread. No-op request handlers for now.
