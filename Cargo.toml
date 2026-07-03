@@ -11,6 +11,7 @@ keywords = ["audio", "midi", "daw", "clap", "pipewire"]
 categories = ["multimedia::audio"]
 
 [dependencies]
+pipewire = "0.10.0"
 rtrb = "0.3.4"
 
 [lints.rust]

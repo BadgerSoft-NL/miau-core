@@ -689,6 +689,17 @@ impl Graph {
     pub fn node<N: Node>(&self, key: NodeKey) -> Option<&N> {
         (self.arena.node(key)? as &dyn Any).downcast_ref::<N>()
     }
+
+    /// After [`process`](Graph::process), the samples on a node's audio output `port`. Returns a
+    /// full block; take `[..frames]`. Lets the io layer pull the graph's result into a hardware
+    /// buffer without exposing the buffer pool.
+    #[must_use]
+    pub fn output(&self, key: NodeKey, port: usize) -> Option<&[f32]> {
+        let step = self.active.steps.iter().find(|s| s.node == key)?;
+        let buffer = *step.audio_out.get(port)? as usize;
+        let block = self.executor.block;
+        Some(&self.executor.audio_pool[buffer * block..(buffer + 1) * block])
+    }
 }
 
 mod nodes;
