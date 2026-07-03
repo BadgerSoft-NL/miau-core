@@ -42,8 +42,9 @@ miau-core/src/
   clap/     — CLAP hosting (ClapNode, discovery, state blobs)
 ```
 
-Dependency direction is law (invariant 1): `time/` and `event/` import from nobody;
-`io/` and `clap/` may know everything. Rust doesn't enforce this — you must.
+Dependency direction is law (invariant 1): `time/` imports from nobody, `event/` and
+`arrange/` only from `time/`; `io/` and `clap/` may know everything. Rust doesn't enforce
+this — you must.
 
 ## The invariants
 

@@ -10,7 +10,8 @@
 //! Dependency direction is law (invariant 1): `time` and `event` import from nobody;
 //! `io` and `clap` may know everything. Rust does not enforce this — we do.
 
-// Pure logic — imports nothing from the rest of the crate (invariant 1).
+// Pure logic. `time` imports from nobody; `event` and `arrange` may use `time` but nothing
+// above them (invariant 1).
 pub mod arrange;
 pub mod event;
 pub mod time;
