@@ -1,6 +1,7 @@
-//! A handful of utility nodes: a test-tone [`Sine`], a [`Gain`], a [`Capture`] sink and the
+//! A handful of utility nodes: a test-tone [`Sine`], a [`Gain`], a [`Capture`] sink, the
 //! [`EventSourceNode`] that adapts an [`EventSource`] into the graph (invariant: clip playback
-//! and generative modules are the same thing to the engine — both enter here).
+//! and generative modules are the same thing to the engine — both enter here), and the
+//! [`Placeholder`] that stands in for a node the engine cannot rebuild.
 
 use std::f64::consts::TAU;
 
@@ -153,6 +154,53 @@ impl Node for EventSourceNode {
             frames,
         };
         self.source.events_in(ctx.ticks, &mut sink);
+    }
+}
+
+/// Stands in for a node the engine cannot rebuild — a missing CLAP plugin (invariant 14) or an
+/// unknown registry `kind` on load (invariant 7). It preserves the graph's shape by exposing the
+/// absent node's port layout and produces silence, dropping any events it receives.
+///
+/// `kind` is the original registry type-id (a CLAP plugin id, say) and `blob` its opaque state,
+/// both carried untouched so a save re-emits the node exactly as loaded. The document, not this
+/// node, is the source of truth on save (invariant 15); the placeholder only keeps the running
+/// graph connectable.
+#[derive(Clone, Debug)]
+pub struct Placeholder {
+    kind: String,
+    blob: Vec<u8>,
+    ports: PortCounts,
+}
+
+impl Placeholder {
+    /// A placeholder for a node of registry type `kind`, preserving its opaque `blob` and
+    /// exposing `ports` so existing connections still attach.
+    #[must_use]
+    pub fn new(kind: String, blob: Vec<u8>, ports: PortCounts) -> Self {
+        Self { kind, blob, ports }
+    }
+
+    /// The registry type-id (e.g. a CLAP plugin id) of the node this stands in for.
+    #[must_use]
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    /// The preserved opaque state blob, handed straight back on save (invariant 14).
+    #[must_use]
+    pub fn blob(&self) -> &[u8] {
+        &self.blob
+    }
+}
+
+impl Node for Placeholder {
+    fn ports(&self) -> PortCounts {
+        self.ports
+    }
+
+    fn process(&mut self, _ctx: &ProcessContext, _io: &mut NodeIO) {
+        // Silence and no events: the executor already zeroed the audio outputs and cleared the
+        // event outputs before the call, so there is nothing to do.
     }
 }
 

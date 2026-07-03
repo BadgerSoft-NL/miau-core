@@ -1,5 +1,6 @@
-//! The audio-thread face of a CLAP plugin — the [`ClapNode`] that lives in the graph arena — plus
-//! the [`Placeholder`] that stands in for a missing plugin (invariant 14).
+//! The audio-thread face of a CLAP plugin — the [`ClapNode`] that lives in the graph arena. A
+//! missing plugin is stood in for by the generic [`Placeholder`](crate::graph::Placeholder),
+//! which lives in `graph/` so `persist/` can build one without depending on `clap/` (invariant 1).
 //!
 //! A [`ClapNode`] owns the plugin's `Send` audio processor (activation and the `!Send`
 //! [`PluginInstance`](super::ClapPlugin) stay on the main thread). Each block it translates the
@@ -218,49 +219,5 @@ pub(super) fn translate_in(buf: &mut EventBuffer, time: u32, event: Event) {
                 ));
             }
         }
-    }
-}
-
-/// Stands in for a plugin that could not be loaded, preserving the graph's shape so connections and
-/// the opaque state blob survive (invariant 14). It exposes the missing node's port layout and
-/// produces silence, dropping any events it receives.
-///
-/// Full save/load round-tripping of the preserved blob lands with persistence (phase 6); the type
-/// lives here so the graph can hold a placeholder wherever a real [`ClapNode`] would go.
-pub struct Placeholder {
-    id: String,
-    state: Vec<u8>,
-    ports: PortCounts,
-}
-
-impl Placeholder {
-    /// A placeholder for the plugin with CLAP `id`, preserving its `state` blob and exposing the
-    /// given port layout so existing connections still attach.
-    #[must_use]
-    pub fn new(id: String, state: Vec<u8>, ports: PortCounts) -> Self {
-        Self { id, state, ports }
-    }
-
-    /// The CLAP id of the plugin this placeholder stands in for.
-    #[must_use]
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-
-    /// The preserved opaque state blob, handed straight back on save (invariant 14).
-    #[must_use]
-    pub fn state(&self) -> &[u8] {
-        &self.state
-    }
-}
-
-impl Node for Placeholder {
-    fn ports(&self) -> PortCounts {
-        self.ports
-    }
-
-    fn process(&mut self, _ctx: &ProcessContext, _io: &mut NodeIO) {
-        // Silence and no events: the executor already zeroed the audio outputs and cleared the
-        // event outputs before the call, so there is nothing to do.
     }
 }

@@ -27,7 +27,7 @@ const MAX_EVENTS: usize = 4096;
 
 /// The two port kinds. Port type is the only routing law (invariant 13): audio connects to
 /// audio, events to events; everything else is shell convention.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum PortType {
     /// A block of `f32` samples.
     Audio,
@@ -36,7 +36,10 @@ pub enum PortType {
 }
 
 /// How many ports of each kind a node exposes. Fixed for the lifetime of the node.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+///
+/// Serde-serializable so a document can record a node's port layout — needed to preserve a
+/// missing plugin's connections through a [`Placeholder`] (invariant 14).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct PortCounts {
     /// Number of audio input ports.
     pub audio_in: usize,
@@ -459,6 +462,21 @@ impl Graph {
         self.arena.insert(Box::new(node), counts)
     }
 
+    /// Adds an already-boxed node and returns its handle. Same as [`add_node`](Graph::add_node),
+    /// but for a trait object whose concrete type isn't known at the call site — e.g. a node built
+    /// by a persistence registry factory (phase 6).
+    pub fn add_node_boxed(&mut self, node: Box<dyn Node>) -> NodeKey {
+        let counts = node.ports();
+        debug_assert!(
+            counts.audio_in <= MAX_PORTS
+                && counts.audio_out <= MAX_PORTS
+                && counts.event_in <= MAX_PORTS
+                && counts.event_out <= MAX_PORTS,
+            "node exceeds MAX_PORTS"
+        );
+        self.arena.insert(node, counts)
+    }
+
     /// Stages `key` for removal; it is dropped via the chute on the next [`commit`](Graph::commit).
     pub fn remove_node(&mut self, key: NodeKey) {
         if self.arena.contains(key) && !self.pending_remove.contains(&key) {
@@ -703,7 +721,7 @@ impl Graph {
 }
 
 mod nodes;
-pub use nodes::{Capture, EventSourceNode, Gain, Sine};
+pub use nodes::{Capture, EventSourceNode, Gain, Placeholder, Sine};
 
 #[cfg(test)]
 mod tests;

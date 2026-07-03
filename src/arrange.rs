@@ -3,31 +3,99 @@
 //!
 //! Pure data + logic; uses [`crate::time`] and [`crate::event`] but nothing above them
 //! (invariant 1). "Tracks" do not exist here — a track is a shell-level coupling of a lane and
-//! a node chain (invariant 13). This is the *minimal* arrangement; clip looping, stretcher IDs
-//! and the full document shape arrive in phase 6.
+//! a node chain (invariant 13). Clips loop, carry an optional time-stretch reference (invariant
+//! 7, applied in phase 7) and an optional sample reference; this is the shape `persist/`
+//! serializes (design log note 10).
 
 use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::event::{Event, EventSink, EventSource};
 use crate::time::{Tick, TickRange};
 
+/// A reference to a time-stretch implementation and its opaque settings.
+///
+/// `id` selects a stretcher registered in [`crate::dsp`] (invariant 7 — unknown ids fall back
+/// with a warning, they never crash). `settings` is arbitrary JSON the core carries but never
+/// interprets; `dsp/` reads it in phase 7. Storing it as [`Value`] keeps a document readable
+/// (design log note 10) without `arrange/` having to understand any stretcher's parameters.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Stretch {
+    /// Registered stretcher id.
+    pub id: String,
+    /// Opaque, stretcher-defined settings, passed through untouched.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub settings: Value,
+}
+
+/// A content-addressed reference to an audio sample: a relative path plus a BLAKE3 hash.
+///
+/// The hash drives relinking after the file moves and lets a shell verify an embedded copy
+/// (design log note 10 §5). The bytes may live in the container under `samples/` or stay
+/// external; the reference is the same either way.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SampleRef {
+    /// Path relative to the document, e.g. `samples/kick.wav`.
+    pub path: String,
+    /// BLAKE3 hash of the referenced bytes.
+    pub hash: [u8; 32],
+}
+
 /// A bounded piece of musical content: events at tick positions, relative to the clip's own
-/// start (`0` = clip start), played once over its `length`.
-#[derive(Clone, Debug, Default)]
+/// start (`0` = clip start).
+///
+/// Over its `length` a clip plays once; when `looping` is set the `[0, length)` content tiles
+/// across the placement's span (see [`Placement`]). A clip may also reference an audio sample
+/// and a time-stretch to apply to it — both carried for persistence and honored by later
+/// phases, ignored by the event-only [`ClipPlayer`] today.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Clip {
     length: Tick,
+    #[serde(default)]
+    looping: bool,
     /// Events sorted by tick. Positions at or past `length` are retained but never played.
     events: Vec<(Tick, Event)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stretch: Option<Stretch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sample: Option<SampleRef>,
 }
 
 impl Clip {
-    /// Creates a clip of `length` from `events`, sorting them by tick (stable, so events at the
-    /// same tick keep their given order). Positions outside `[0, length)` are kept but the
+    /// Creates a one-shot clip of `length` from `events`, sorting them by tick (stable, so events
+    /// at the same tick keep their given order). Positions outside `[0, length)` are kept but the
     /// player clips them away.
     #[must_use]
     pub fn new(length: Tick, mut events: Vec<(Tick, Event)>) -> Self {
         events.sort_by_key(|(tick, _)| tick.get());
-        Self { length, events }
+        Self {
+            length,
+            events,
+            ..Self::default()
+        }
+    }
+
+    /// Sets whether the clip loops (its `[0, length)` content tiles across the placement span).
+    #[must_use]
+    pub fn with_looping(mut self, looping: bool) -> Self {
+        self.looping = looping;
+        self
+    }
+
+    /// Attaches a time-stretch reference (invariant 7), carried through persistence.
+    #[must_use]
+    pub fn with_stretch(mut self, stretch: Stretch) -> Self {
+        self.stretch = Some(stretch);
+        self
+    }
+
+    /// Attaches a sample reference, carried through persistence.
+    #[must_use]
+    pub fn with_sample(mut self, sample: SampleRef) -> Self {
+        self.sample = Some(sample);
+        self
     }
 
     /// The clip's length in ticks.
@@ -36,37 +104,75 @@ impl Clip {
         self.length
     }
 
+    /// Whether the clip loops across its placement span.
+    #[must_use]
+    pub fn is_looping(&self) -> bool {
+        self.looping
+    }
+
     /// The clip's events, sorted by tick.
     #[must_use]
     pub fn events(&self) -> &[(Tick, Event)] {
         &self.events
     }
+
+    /// The clip's time-stretch reference, if any.
+    #[must_use]
+    pub fn stretch(&self) -> Option<&Stretch> {
+        self.stretch.as_ref()
+    }
+
+    /// The clip's sample reference, if any.
+    #[must_use]
+    pub fn sample(&self) -> Option<&SampleRef> {
+        self.sample.as_ref()
+    }
 }
 
-/// A clip placed at a tick on the lane's timeline.
-#[derive(Clone, Debug)]
+/// A clip placed at a tick on the lane's timeline, occupying a `span` of ticks.
+///
+/// The span defaults to the clip's length (a one-shot placement). A longer span on a looping
+/// clip repeats the content to fill it; on a non-looping clip the tail past the content is
+/// silence. Events only ever come from the clip's own `[0, length)` window.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Placement {
     start: Tick,
+    span: Tick,
     clip: Clip,
 }
 
 impl Placement {
-    /// Places `clip` so its local tick `0` sits at timeline tick `start`.
+    /// Places `clip` so its local tick `0` sits at timeline tick `start`, spanning the clip's
+    /// own length (one shot).
     #[must_use]
     pub fn new(start: Tick, clip: Clip) -> Self {
-        Self { start, clip }
+        let span = clip.length;
+        Self { start, span, clip }
     }
 
-    /// Timeline tick where the clip begins.
+    /// Places `clip` at `start` occupying `span` ticks of the timeline — longer than the clip to
+    /// loop or pad it, shorter to truncate it.
+    #[must_use]
+    pub fn with_span(start: Tick, span: Tick, clip: Clip) -> Self {
+        Self { start, span, clip }
+    }
+
+    /// Timeline tick where the placement begins.
     #[must_use]
     pub fn start(&self) -> Tick {
         self.start
     }
 
-    /// Timeline tick one past the clip's content (`start + clip.length`).
+    /// Timeline tick one past the placement (`start + span`).
     #[must_use]
     pub fn end(&self) -> Tick {
-        Tick::new(self.start.get() + self.clip.length.get())
+        Tick::new(self.start.get() + self.span.get())
+    }
+
+    /// The placement's span in ticks.
+    #[must_use]
+    pub fn span(&self) -> Tick {
+        self.span
     }
 
     /// The placed clip.
@@ -78,9 +184,9 @@ impl Placement {
 
 /// A sequence of clip placements on a timeline.
 ///
-/// Placements are sorted by start. This minimal phase assumes they do not overlap; the player
-/// relies on that to find the relevant placements with a binary search.
-#[derive(Clone, Debug, Default)]
+/// Placements are sorted by start and assumed not to overlap; the player relies on that to find
+/// the relevant placements with a binary search.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Lane {
     placements: Vec<Placement>,
 }
@@ -145,25 +251,65 @@ impl EventSource for ClipPlayer {
             if base >= range.end.get() {
                 break; // placements are start-sorted: nothing further overlaps
             }
-            // Intersect the range with this clip's local span `[0, length)`.
-            let local_lo = range.start.get().saturating_sub(base);
-            let local_hi = range
-                .end
-                .get()
-                .saturating_sub(base)
-                .min(placement.clip.length.get());
-            if local_lo >= local_hi {
-                continue;
-            }
-            let events = &placement.clip.events;
-            let from = events.partition_point(|(tick, _)| tick.get() < local_lo);
-            for (tick, event) in &events[from..] {
-                if tick.get() >= local_hi {
-                    break;
-                }
-                sink.push(Tick::new(base + tick.get()), *event);
-            }
+            emit_placement(placement, base, range, sink);
         }
+    }
+}
+
+/// Emits the events of one placement overlapping `range`, translated to timeline ticks.
+///
+/// A one-shot placement resolves to a single content window; a looping clip tiles its
+/// `[0, length)` content across the placement span, one iteration at a time. Work is bounded by
+/// the loop iterations in the block (never by user data), so this stays realtime-safe
+/// (invariant 5) as long as the block is bounded.
+fn emit_placement(placement: &Placement, base: u64, range: TickRange, sink: &mut dyn EventSink) {
+    let clip = &placement.clip;
+    let length = clip.length.get();
+    // The timeline window this placement can sound over: its span, clipped to the query range.
+    let span_end = base + placement.span.get();
+    let lo = range.start.get().max(base);
+    let hi = range.end.get().min(span_end);
+    if lo >= hi {
+        return;
+    }
+    if !clip.looping || length == 0 {
+        // One shot: events come from `[0, min(length, span))` at their given timeline positions.
+        emit_iteration(clip, base, length, lo, hi, sink);
+        return;
+    }
+    // Looping: walk the loop iterations that overlap `[lo, hi)`.
+    let mut iter_start = base + (lo - base) / length * length;
+    while iter_start < hi {
+        // The last iteration may be cut short by the placement span.
+        let iter_len = length.min(span_end - iter_start);
+        emit_iteration(clip, iter_start, iter_len, lo, hi, sink);
+        iter_start += length;
+    }
+}
+
+/// Emits the clip events falling in the timeline window `[lo, hi)` for a single content
+/// iteration whose local tick `0` sits at `iter_start` and whose content spans `iter_len` ticks.
+fn emit_iteration(
+    clip: &Clip,
+    iter_start: u64,
+    iter_len: u64,
+    lo: u64,
+    hi: u64,
+    sink: &mut dyn EventSink,
+) {
+    let local_lo = lo.saturating_sub(iter_start);
+    let local_hi = hi.saturating_sub(iter_start).min(iter_len);
+    if local_lo >= local_hi {
+        return;
+    }
+    let from = clip
+        .events
+        .partition_point(|(tick, _)| tick.get() < local_lo);
+    for (tick, event) in &clip.events[from..] {
+        if tick.get() >= local_hi {
+            break;
+        }
+        sink.push(Tick::new(iter_start + tick.get()), *event);
     }
 }
 
@@ -258,5 +404,64 @@ mod tests {
         let mut player = ClipPlayer::new(lane);
         // Tick 40 == length is out of `[0, 40)`, so only tick 10 plays over the full window.
         assert_eq!(play(&mut player, 0, 1000), vec![(Tick::new(10), on(61))]);
+    }
+
+    #[test]
+    fn looping_clip_tiles_its_content_across_the_span() {
+        // A 10-tick clip with one event at local tick 2, looped across a 35-tick placement.
+        let clip = Clip::new(Tick::new(10), vec![(Tick::new(2), on(60))]).with_looping(true);
+        let lane = Arc::new(Lane::new(vec![Placement::with_span(
+            Tick::new(100),
+            Tick::new(35),
+            clip,
+        )]));
+        let mut player = ClipPlayer::new(lane);
+        // Iterations start at 100, 110, 120, 130; the event lands at +2 in each whole one. The
+        // fourth iteration is cut at 135 but local tick 2 (== 132) still fits.
+        assert_eq!(
+            play(&mut player, 0, 1000),
+            vec![
+                (Tick::new(102), on(60)),
+                (Tick::new(112), on(60)),
+                (Tick::new(122), on(60)),
+                (Tick::new(132), on(60)),
+            ]
+        );
+        // A sub-window only reports the iterations it overlaps, still block-bounded.
+        assert_eq!(play(&mut player, 115, 125), vec![(Tick::new(122), on(60))]);
+    }
+
+    #[test]
+    fn looping_last_iteration_is_cut_by_the_span() {
+        // Event at local tick 7; the final partial iteration (130..135) ends before tick 7 hits.
+        let clip = Clip::new(Tick::new(10), vec![(Tick::new(7), on(64))]).with_looping(true);
+        let lane = Arc::new(Lane::new(vec![Placement::with_span(
+            Tick::new(100),
+            Tick::new(35),
+            clip,
+        )]));
+        let mut player = ClipPlayer::new(lane);
+        assert_eq!(
+            play(&mut player, 0, 1000),
+            vec![
+                (Tick::new(107), on(64)),
+                (Tick::new(117), on(64)),
+                (Tick::new(127), on(64)),
+                // 137 would be the fourth, but the span ends at 135 — dropped.
+            ]
+        );
+    }
+
+    #[test]
+    fn non_looping_span_longer_than_content_pads_silence() {
+        let clip = Clip::new(Tick::new(10), vec![(Tick::new(3), on(60))]);
+        let lane = Arc::new(Lane::new(vec![Placement::with_span(
+            Tick::new(0),
+            Tick::new(50),
+            clip,
+        )]));
+        let mut player = ClipPlayer::new(lane);
+        // Content plays once at tick 3; the rest of the 50-tick span is silent.
+        assert_eq!(play(&mut player, 0, 50), vec![(Tick::new(3), on(60))]);
     }
 }

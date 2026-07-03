@@ -6,11 +6,18 @@
 
 use core::fmt;
 
+use serde::{Deserialize, Serialize};
+
 /// A musical position or duration in ticks.
 ///
 /// invariant 4: musical data lives in ticks at 960 PPQ ([`Tick::PPQ`]); sample positions appear
 /// only at scheduling, via the [`TempoMap`]. Never use a bare integer for musical time.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
+///
+/// Serializes transparently as its raw tick count — persistence keeps musical time in ticks
+/// (invariant 4), so a document is human- and LLM-readable (design log note 10).
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, Serialize, Deserialize,
+)]
 pub struct Tick(u64);
 
 impl Tick {
@@ -76,7 +83,7 @@ impl SampleOffset {
 ///
 /// One block's worth of musical time: the transport produces one per block and an
 /// [`EventSource`](crate::event::EventSource) is asked to emit the events that fall inside it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct TickRange {
     /// Inclusive start.
     pub start: Tick,
@@ -111,7 +118,10 @@ impl TickRange {
 }
 
 /// One entry of a stepwise tempo map: a tempo that holds from `start` until the next entry.
-#[derive(Clone, Copy, PartialEq, Debug)]
+///
+/// This is the *persisted* form of the tempo map (invariant 9's input): a document stores the
+/// segments and rebuilds the compiled [`TempoMap`] on load for its device sample rate.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct TempoSegment {
     /// Tick at which this tempo takes effect. The first segment must start at `Tick(0)`.
     pub start: Tick,

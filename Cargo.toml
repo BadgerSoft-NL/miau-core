@@ -11,10 +11,17 @@ keywords = ["audio", "midi", "daw", "clap", "pipewire"]
 categories = ["multimedia::audio"]
 
 [dependencies]
+# persist/ (phase 6): serde is the document model, serde_json the manifest, zip the container
+# and blake3 the sample content hash — all four named in design-log note 10.
+blake3 = "1"
 clack-extensions = { version = "0.1.0", features = ["audio-ports", "clack-host", "note-ports", "params", "state"] }
 clack-host = "0.1.0"
 pipewire = "0.10.0"
 rtrb = "0.3.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Only DEFLATE is needed; the container is a plain ZIP, no other codecs to carry.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [lints.rust]
 missing_docs = "warn"

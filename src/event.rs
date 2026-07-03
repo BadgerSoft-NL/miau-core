@@ -4,6 +4,8 @@
 //! but nothing above it (invariant 1). Raw MIDI bytes never reach here — they become typed
 //! events at the io edge (invariant 6).
 
+use serde::{Deserialize, Serialize};
+
 use crate::time::{Tick, TickRange};
 
 /// A typed musical event.
@@ -12,7 +14,9 @@ use crate::time::{Tick, TickRange};
 /// enum. invariant 13: automation is not a separate system — a [`Event::ParamChange`] rides an
 /// ordinary event port like any other event, and a node ignores variants it doesn't understand.
 /// MPE / MIDI 2.0 are deliberately deferred, so note events carry a plain channel and key.
-#[derive(Clone, Copy, PartialEq, Debug)]
+///
+/// Serde-serializable so clips persist their events verbatim (invariant 4: still in ticks).
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Event {
     /// Start a note. A `NoteOn` always means *on*: the io edge rewrites the running-status
     /// "note-on, velocity 0" convention into [`Event::NoteOff`] before it reaches the core.
@@ -62,7 +66,7 @@ pub enum Event {
 ///
 /// The value matches a CLAP `clap_id`; the receiving node is selected by the event-port
 /// connection, so the id only has to be unique within that node.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct ParamId(pub u32);
 
 /// The sink an [`EventSource`] emits into.
