@@ -35,11 +35,11 @@ miau-core/src/
   time      — Tick, SamplePos, tempo map, musical↔sample conversion
   event     — typed Event enum, EventSource trait, note tracker
   arrange   — lanes, clips, ClipPlayer (EventSource); "tracks" do not exist here
-  transport — play/stop/locate/loop, block scheduling, tempo-map snapshot swap
+  transport — play/stop/locate/loop, block scheduling, tempo-map swap, MIDI clock out
   graph/    — Node trait, ports, topology snapshots, schedule, buffer pool
   dsp       — TimeStretcher trait + default implementations (registry pattern)
   persist/  — Document types, ZIP container, .miauclip exchange format
-  io/       — PipeWire client, hardware MIDI
+  io/       — PipeWire client (one node, N MIDI/audio ports), MIDI in and out
   clap/     — CLAP hosting (ClapNode, discovery, state blobs)
 ```
 
@@ -105,7 +105,11 @@ a new one and swaps it atomically.
 
 - **`Tick(u64)`** at 960 PPQ. The tempo map is stepwise with precomputed cumulative sample
   positions; conversion to `SamplePos` happens only at scheduling time.
-- **`Event`** is a typed enum (`NoteOn`, `NoteOff`, `Control`, `PitchBend`, `ParamChange`, …).
+- **`Event`** is a typed enum covering MIDI 1.0 channel voice completely (`NoteOn`, `NoteOff`,
+  `PolyPressure`, `Control`, `ProgramChange`, `ChannelPressure`, `PitchBend`) plus `ParamChange`.
+  System messages are deliberately absent: they are synchronisation, not music. They have their
+  own type, `transport::SyncMessage` (clock, start/continue/stop, song position), so a clock pulse
+  can never be mistaken for a note. SysEx stays out entirely.
   Automation is not a separate system: a `ParamChange` travels through an ordinary event port.
 - **`EventSource`** is the musical contract: given a tick range, emit events. Clip playback and
   generative modules are *the same thing* to the engine — this is the core's key departure from
@@ -116,7 +120,9 @@ a new one and swaps it atomically.
   the transport and emits `(SampleOffset, Event)`.
 - **Ports**: exactly two types, `AudioPort` (f32 buffer per block) and `EventPort`
   (timestamped messages). Don't confuse the three layers: port type (2 kinds, routing law),
-  event variant (growing enum, node behavior), track nature (emergent shell label).
+  event variant (growing enum, node behavior), track nature (emergent shell label). Both types
+  are readable at the io edge after a block — `Graph::output` for audio, `Graph::events_output`
+  for events — so a MIDI-only shell reaches the wire the same way an audio one does.
 - **Registry pattern**: `StretcherRegistry::register("paulstretch", factory)` (and the parallel
   `NodeRegistry` for graph nodes). Compile-time extension, not runtime plugins. Clips reference
   implementations by string ID; unknown IDs fall back with a warning (`dsp/` falls back to

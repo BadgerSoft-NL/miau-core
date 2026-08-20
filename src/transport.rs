@@ -306,6 +306,253 @@ impl TransportHandle {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Transport sync (MIDI clock).
+// ---------------------------------------------------------------------------------------------
+
+/// A transport-synchronisation message — the MIDI system messages that carry *timing* rather
+/// than music.
+///
+/// Deliberately **not** part of [`Event`](crate::event::Event): an event is something a note port
+/// carries and a synth plays, while these steer other machines' transports. Keeping them apart is
+/// what stops a clock pulse from ever being mistaken for a note (invariant 13: nodes ignore what
+/// they don't understand, and a synth should never have to understand clock).
+///
+/// Raw bytes still exist only at the io edge (invariant 6) — see
+/// [`parse_sync`](crate::io::parse_sync) / [`encode_sync`](crate::io::encode_sync).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SyncMessage {
+    /// One timing pulse. 24 of these per quarter note, by MIDI's definition.
+    Clock,
+    /// Start playing from the very beginning.
+    Start,
+    /// Resume playing from the current position.
+    Continue,
+    /// Stop playing.
+    Stop,
+    /// Where the song is, in MIDI beats (sixteenth notes) from the start.
+    SongPosition(u16),
+}
+
+/// Ticks between two MIDI clock pulses: 24 pulses per quarter note, exactly, at 960 PPQ.
+pub const CLOCK_TICKS: u64 = Tick::PPQ / 24;
+/// Ticks in one MIDI beat (a sixteenth note), the unit a song-position pointer counts in.
+pub const SONG_POSITION_TICKS: u64 = Tick::PPQ / 4;
+
+/// Generates outgoing MIDI clock from the transport's own motion — miau as the clock master.
+///
+/// Fed one block at a time, it emits [`SyncMessage`]s at their tick positions: `Start` or
+/// `SongPosition` + `Continue` when playback begins, `Stop` when it ends, and a `Clock` pulse
+/// every [`CLOCK_TICKS`] in between. It reads the transport rather than living inside it, so
+/// nothing about clock leaks into scheduling — a shell that wants no clock simply never builds
+/// one.
+///
+/// Realtime-safe: no allocation, no locks, and work bounded by the block's length (invariant 5).
+#[derive(Clone, Debug, Default)]
+pub struct ClockMaster {
+    /// Whether the transport was playing at the end of the previous block.
+    running: bool,
+}
+
+impl ClockMaster {
+    /// A master that believes the transport is stopped.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { running: false }
+    }
+
+    /// Whether a `Start`/`Continue` has been sent without a matching `Stop`.
+    #[must_use]
+    pub const fn is_running(&self) -> bool {
+        self.running
+    }
+
+    /// Emits this slice's sync messages, in ascending tick order.
+    ///
+    /// Call once per [`BlockStep::Play`] with that slice's range, and once with an empty range
+    /// when the transport is not playing so a `Stop` still goes out. `range` is half-open, so a
+    /// pulse exactly on `range.end` belongs to the next slice and is never sent twice.
+    pub fn slice(
+        &mut self,
+        playing: bool,
+        range: TickRange,
+        emit: &mut impl FnMut(Tick, SyncMessage),
+    ) {
+        match (self.running, playing) {
+            (false, true) => {
+                self.running = true;
+                // MIDI distinguishes the two: `Start` means "from the top", `Continue` means
+                // "resume", and a receiver needs a song position to resume *to*.
+                if range.start == Tick::new(0) {
+                    emit(range.start, SyncMessage::Start);
+                } else {
+                    emit(
+                        range.start,
+                        SyncMessage::SongPosition(song_position(range.start)),
+                    );
+                    emit(range.start, SyncMessage::Continue);
+                }
+            }
+            (true, false) => {
+                self.running = false;
+                emit(range.start, SyncMessage::Stop);
+                return;
+            }
+            _ => {}
+        }
+        if !playing {
+            return;
+        }
+        for tick in pulses_in(range) {
+            emit(tick, SyncMessage::Clock);
+        }
+    }
+
+    /// Tells the master the transport jumped, so the next `Continue` carries the right position.
+    /// A receiver that is already running is re-pointed with a fresh `SongPosition`.
+    pub fn located(&mut self, to: Tick, emit: &mut impl FnMut(Tick, SyncMessage)) {
+        if self.running {
+            emit(to, SyncMessage::Stop);
+            self.running = false;
+        }
+        emit(to, SyncMessage::SongPosition(song_position(to)));
+    }
+}
+
+/// The song-position pointer for `tick`, in MIDI beats (sixteenth notes), saturating at the
+/// 14-bit field MIDI gives it.
+#[must_use]
+pub fn song_position(tick: Tick) -> u16 {
+    u16::try_from(tick.get() / SONG_POSITION_TICKS).unwrap_or(u16::MAX) & 0x3FFF
+}
+
+/// The clock-pulse ticks inside `range`, ascending. Half-open: `range.end` belongs to the next
+/// slice, so consecutive slices never double-send a pulse on their shared boundary.
+fn pulses_in(range: TickRange) -> impl Iterator<Item = Tick> {
+    let start = range.start.get();
+    let end = range.end.get();
+    // Round `start` up to the next multiple of CLOCK_TICKS.
+    let first = start.div_ceil(CLOCK_TICKS) * CLOCK_TICKS;
+    (first..end).step_by(CLOCK_TICKS as usize).map(Tick::new)
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+
+    /// Runs one slice and returns what the master emitted.
+    fn slice(
+        master: &mut ClockMaster,
+        playing: bool,
+        from: u64,
+        to: u64,
+    ) -> Vec<(Tick, SyncMessage)> {
+        let mut out = Vec::new();
+        master.slice(
+            playing,
+            TickRange::new(Tick::new(from), Tick::new(to)),
+            &mut |tick, message| out.push((tick, message)),
+        );
+        out
+    }
+
+    #[test]
+    fn twenty_four_pulses_per_quarter_note() {
+        let mut master = ClockMaster::new();
+        let out = slice(&mut master, true, 0, Tick::PPQ);
+        let clocks = out.iter().filter(|(_, m)| *m == SyncMessage::Clock).count();
+        assert_eq!(clocks, 24, "MIDI defines 24 clocks per quarter note");
+        assert_eq!(out[0], (Tick::new(0), SyncMessage::Start));
+    }
+
+    /// A pulse on a slice boundary belongs to exactly one slice — the seam is where a clock
+    /// master would otherwise stutter or drop a beat.
+    #[test]
+    fn slice_boundaries_neither_duplicate_nor_lose_a_pulse() {
+        let mut whole = ClockMaster::new();
+        let one_go: Vec<Tick> = slice(&mut whole, true, 0, 4 * Tick::PPQ)
+            .into_iter()
+            .filter(|(_, m)| *m == SyncMessage::Clock)
+            .map(|(t, _)| t)
+            .collect();
+
+        // The same span cut at arbitrary points, including exactly on a pulse (40, 80) and
+        // between pulses (57, 1234).
+        let mut split = ClockMaster::new();
+        let mut piecewise = Vec::new();
+        let mut from = 0;
+        for to in [40, 41, 80, 57 + 80, 1234, 4 * Tick::PPQ] {
+            for (tick, message) in slice(&mut split, true, from, to) {
+                if message == SyncMessage::Clock {
+                    piecewise.push(tick);
+                }
+            }
+            from = to;
+        }
+        assert_eq!(one_go, piecewise);
+        assert_eq!(one_go.len(), 96); // 4 quarter notes x 24
+    }
+
+    #[test]
+    fn starting_from_zero_starts_and_starting_elsewhere_continues() {
+        let mut from_top = ClockMaster::new();
+        let out = slice(&mut from_top, true, 0, 10);
+        assert_eq!(out.first(), Some(&(Tick::new(0), SyncMessage::Start)));
+
+        // Resuming mid-song must tell the receiver *where* first, or it continues from its own
+        // stale position.
+        let mut resumed = ClockMaster::new();
+        let out = slice(&mut resumed, true, 2 * Tick::PPQ, 2 * Tick::PPQ + 10);
+        assert_eq!(
+            &out[..2],
+            &[
+                (Tick::new(2 * Tick::PPQ), SyncMessage::SongPosition(8)),
+                (Tick::new(2 * Tick::PPQ), SyncMessage::Continue),
+            ]
+        );
+    }
+
+    #[test]
+    fn stopping_emits_stop_once_and_then_stays_quiet() {
+        let mut master = ClockMaster::new();
+        slice(&mut master, true, 0, 100);
+        assert!(master.is_running());
+
+        let stopped = slice(&mut master, false, 100, 100);
+        assert_eq!(stopped, vec![(Tick::new(100), SyncMessage::Stop)]);
+        assert!(!master.is_running());
+        assert!(slice(&mut master, false, 100, 100).is_empty(), "no repeat");
+    }
+
+    #[test]
+    fn locating_repoints_the_receiver() {
+        let mut master = ClockMaster::new();
+        slice(&mut master, true, 0, 100);
+
+        let mut out = Vec::new();
+        master.located(Tick::new(4 * Tick::PPQ), &mut |t, m| out.push((t, m)));
+        assert_eq!(
+            out,
+            vec![
+                (Tick::new(4 * Tick::PPQ), SyncMessage::Stop),
+                (Tick::new(4 * Tick::PPQ), SyncMessage::SongPosition(16)),
+            ]
+        );
+        // Playback resumes from the new spot with a Continue, not a Start.
+        let resumed = slice(&mut master, true, 4 * Tick::PPQ, 4 * Tick::PPQ + 10);
+        assert_eq!(resumed[1].1, SyncMessage::Continue);
+    }
+
+    #[test]
+    fn song_position_counts_sixteenth_notes_and_saturates() {
+        assert_eq!(song_position(Tick::new(0)), 0);
+        assert_eq!(song_position(Tick::new(SONG_POSITION_TICKS)), 1);
+        assert_eq!(song_position(Tick::new(Tick::PPQ)), 4); // one quarter = 4 sixteenths
+        // The field is 14 bits; a position past it clamps rather than wrapping to the top.
+        assert_eq!(song_position(Tick::new(u64::MAX)), 0x3FFF);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

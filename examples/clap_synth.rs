@@ -8,13 +8,13 @@
 //!                        (default: "surge")
 //!     param-id           CLAP parameter id to sweep; omit to auto-pick a likely-audible one
 //!
-//! Two PipeWire streams run, each on its own main loop and thread: the MIDI capture stream feeds
-//! typed events across a lock-free ring buffer into the graph's `LiveInput` node (invariant 11: the
-//! audio thread never blocks or allocates), and the audio playback stream *pulls* the graph. Route
-//! your keyboard to "miau clap synth" and the output to your speakers externally (e.g. qpwgraph).
+//! One PipeWire client carries both directions: `midi_in_0` for the keyboard and `audio_out_0` for
+//! the result, driven by a single process callback. Because input and output share a block, live
+//! MIDI keeps its real sample offset instead of being flattened to the block start. Route your
+//! keyboard to "miau clap synth" and its output to your speakers externally (e.g. qpwgraph).
 //! Ctrl-C to stop.
 //!
-//! io audio output is mono while a synth emits N (usually stereo) channels, so this monitors the
+//! The audio port is mono while a synth emits N (usually stereo) channels, so this monitors the
 //! plugin's channel 0 (left).
 
 use std::error::Error;
@@ -22,22 +22,24 @@ use std::error::Error;
 use miau_core::clap::{ClapPlugin, ParamDesc, PluginInfo, scan};
 use miau_core::event::{Event, ParamId};
 use miau_core::graph::{Graph, Node, NodeIO, PortCounts, ProcessContext};
-use miau_core::io::{run_audio_output, run_midi_input};
+use miau_core::io::ClientBuilder;
 use miau_core::time::{SampleOffset, SamplePos, Tick, TickRange};
 
 const RATE: u32 = 48_000;
 /// Max graph block; also the plugin's `max_frames_count`. Generous so any negotiated PipeWire
 /// quantum fits (the audio callback renders `frames <= MAX_BLOCK`).
 const MAX_BLOCK: usize = 16_384;
-/// Ring-buffer capacity in events — deep enough that a busy keyboard never overruns one audio block.
-const RING: usize = 1024;
+/// Per-block event capacity — deep enough that a busy keyboard never overruns one block.
+const MAX_EVENTS: usize = 1024;
 /// Sweep rate of the automation LFO, in Hz.
 const LFO_HZ: f64 = 0.15;
 
-/// The graph's live-input node: it drains hardware MIDI events from the ring buffer and, if enabled,
-/// emits an automation `ParamChange` each block. Both ride the single event output into the synth.
+/// The graph's live-input node: it replays the hardware MIDI the client handed it for this block
+/// and, if enabled, emits an automation `ParamChange`. Both ride the single event output into the
+/// synth.
 struct LiveInput {
-    rx: rtrb::Consumer<Event>,
+    /// This block's incoming events, refilled by the driver before every `graph.process`.
+    pending: Vec<(SampleOffset, Event)>,
     automation: Option<Automation>,
 }
 
@@ -59,12 +61,9 @@ impl Node for LiveInput {
     fn process(&mut self, ctx: &ProcessContext, io: &mut NodeIO) {
         let out = io.events_out(0);
 
-        // Live MIDI has no meaningful offset within *this* audio block (it arrived asynchronously on
-        // the capture stream), so place every drained event at the block start. FIFO order is kept,
-        // which satisfies the nondecreasing-offset order the synth requires.
-        while let Ok(event) = self.rx.pop() {
-            out.push((SampleOffset::new(0), event));
-        }
+        // One client means the keyboard's events arrived in *this* block, so they keep the offset
+        // the io edge measured — sample-accurate, and already in nondecreasing order.
+        out.extend_from_slice(&self.pending);
 
         if let Some(a) = &self.automation {
             let t = ctx.block_start.get() as f64 / f64::from(ctx.sample_rate);
@@ -199,50 +198,63 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // Build the graph: LiveInput (MIDI + automation) -> ClapNode -> speakers (channel 0).
-    let (tx, rx) = rtrb::RingBuffer::<Event>::new(RING);
     let mut graph = Graph::new(MAX_BLOCK);
     let input = graph.add_node(LiveInput {
-        rx,
+        // Preallocated: the process callback must not allocate (invariant 11).
+        pending: Vec::with_capacity(MAX_EVENTS),
         automation: chosen,
     });
     let clap = graph.add_node(node);
     graph.connect_event((input, 0), (clap, 0))?;
     graph.commit();
 
-    // Hardware MIDI on its own thread: parse to typed events at the edge, push across the ring. A
-    // dropped event (ring full) is better than blocking the capture callback.
-    std::thread::spawn(move || {
-        let mut tx = tx;
-        let result = run_midi_input("miau clap synth", move |control| {
-            if let Some(event) = control.event() {
-                let _ = tx.push(event);
-            }
-        });
-        if let Err(e) = result {
-            eprintln!("MIDI input stopped: {e}");
-        }
-    });
-
-    // Audio pull on the main thread: drive the graph and copy the synth's channel 0 to the speakers.
-    // `plugin` stays alive here on the main thread (its `!Send` handle is the plugin's other face);
-    // dropping the retired node through the graph's chute performs teardown off the audio thread.
-    println!("playing — Ctrl-C to stop");
+    // One client, both directions. `plugin` stays alive on the main thread (its `!Send` handle is
+    // the plugin's other face); dropping the retired node through the graph's chute performs
+    // teardown off the audio thread.
     let mut position: u64 = 0;
-    run_audio_output("miau clap synth", RATE, move |out| {
-        let frames = out.len();
-        let ctx = ProcessContext {
-            frames,
-            sample_rate: RATE,
-            block_start: SamplePos::new(position),
-            ticks: TickRange::new(Tick::new(0), Tick::new(0)),
-            tempo: None,
-        };
-        graph.process(&ctx);
-        if let Some(rendered) = graph.output(clap, 0) {
-            out.copy_from_slice(&rendered[..frames]);
-        }
-        position += frames as u64;
-    })?;
+    let client = ClientBuilder::new("miau clap synth")
+        .midi_in(1)
+        .audio_out(1)
+        .start(move |block| {
+            // Collect this block's keyboard input straight into the node — no queue needed when
+            // the io edge and the graph share a thread.
+            if let Some(live) = graph.node_mut::<LiveInput>(input) {
+                live.pending.clear();
+                block.midi_in(0, |control| {
+                    if let Some(event) = control.event()
+                        && live.pending.len() < MAX_EVENTS
+                    {
+                        live.pending
+                            .push((SampleOffset::new(control.offset), event));
+                    }
+                });
+            }
 
-    Ok(())
+            let Some(out) = block.audio_out(0) else {
+                return;
+            };
+            let frames = out.len();
+            let ctx = ProcessContext {
+                frames,
+                sample_rate: RATE,
+                block_start: SamplePos::new(position),
+                ticks: TickRange::new(Tick::new(0), Tick::new(0)),
+                tempo: None,
+            };
+            graph.process(&ctx);
+            if let Some(rendered) = graph.output(clap, 0) {
+                out.copy_from_slice(&rendered[..frames]);
+            }
+            position += frames as u64;
+        })?;
+
+    println!(
+        "playing on node {} — route your keyboard to \"miau clap synth\" and its output to your \
+         speakers (e.g. in qpwgraph). Ctrl-C to stop.",
+        client.node_id()
+    );
+
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
 }

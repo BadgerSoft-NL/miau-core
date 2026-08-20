@@ -708,6 +708,22 @@ impl Graph {
         (self.arena.node(key)? as &dyn Any).downcast_ref::<N>()
     }
 
+    /// Borrows a node mutably as its concrete type `N` — the mirror of [`node`](Graph::node).
+    ///
+    /// For a driver that owns the graph and feeds a node from its own process callback: with one
+    /// client, hardware input and rendering happen on the same thread, so handing the block's
+    /// events straight to a node beats routing them through a queue to itself. From *another*
+    /// thread this is not the way in — use a lock-free queue the node owns (invariant 2).
+    #[must_use]
+    pub fn node_mut<N: Node>(&mut self, key: NodeKey) -> Option<&mut N> {
+        // The arena's own `node_mut` is the hot path and assumes a live key; check first so a
+        // stale handle yields `None` here rather than panicking (invariant 10: misuse-proof).
+        if !self.arena.contains(key) {
+            return None;
+        }
+        (self.arena.node_mut(key) as &mut dyn Any).downcast_mut::<N>()
+    }
+
     /// After [`process`](Graph::process), the samples on a node's audio output `port`. Returns a
     /// full block; take `[..frames]`. Lets the io layer pull the graph's result into a hardware
     /// buffer without exposing the buffer pool.
@@ -717,6 +733,19 @@ impl Graph {
         let buffer = *step.audio_out.get(port)? as usize;
         let block = self.executor.block;
         Some(&self.executor.audio_pool[buffer * block..(buffer + 1) * block])
+    }
+
+    /// After [`process`](Graph::process), the events on a node's event output `port`, in
+    /// nondecreasing offset order. The event mirror of [`output`](Graph::output): it lets the io
+    /// layer pull the graph's events into a hardware MIDI buffer without exposing the pool.
+    ///
+    /// Without this a MIDI-only shell has no way out of the graph — audio reaches the edge
+    /// through `output`, events had no equivalent.
+    #[must_use]
+    pub fn events_output(&self, key: NodeKey, port: usize) -> Option<&[(SampleOffset, Event)]> {
+        let step = self.active.steps.iter().find(|s| s.node == key)?;
+        let buffer = *step.event_out.get(port)? as usize;
+        Some(self.executor.event_pool.get(buffer)?.as_slice())
     }
 }
 

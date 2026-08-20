@@ -15,6 +15,11 @@ use crate::time::{Tick, TickRange};
 /// ordinary event port like any other event, and a node ignores variants it doesn't understand.
 /// MPE / MIDI 2.0 are deliberately deferred, so note events carry a plain channel and key.
 ///
+/// The channel-voice variants cover MIDI 1.0 completely, so nothing a keyboard or sequencer can
+/// send is lost at the edge. System messages (clock, transport, SysEx) are *not* here: they are
+/// not music, they are synchronisation, and they belong to a transport-sync layer the core does
+/// not have yet.
+///
 /// Serde-serializable so clips persist their events verbatim (invariant 4: still in ticks).
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Event {
@@ -37,6 +42,15 @@ pub enum Event {
         /// Release velocity, `0..128`.
         velocity: u8,
     },
+    /// Pressure applied to one held key after it sounded (polyphonic aftertouch).
+    PolyPressure {
+        /// MIDI channel, `0..16`.
+        channel: u8,
+        /// Note number the pressure applies to, `0..128`.
+        key: u8,
+        /// Pressure, `0..128`.
+        pressure: u8,
+    },
     /// A continuous-controller change.
     Control {
         /// MIDI channel, `0..16`.
@@ -45,6 +59,20 @@ pub enum Event {
         controller: u8,
         /// Controller value, `0..128`.
         value: u8,
+    },
+    /// A patch/preset selection on a channel.
+    ProgramChange {
+        /// MIDI channel, `0..16`.
+        channel: u8,
+        /// Program number, `0..128`.
+        program: u8,
+    },
+    /// Pressure applied to every held key on a channel at once (channel aftertouch).
+    ChannelPressure {
+        /// MIDI channel, `0..16`.
+        channel: u8,
+        /// Pressure, `0..128`.
+        pressure: u8,
     },
     /// A pitch-bend change, centered at zero (`-8192..=8191`, 14-bit).
     PitchBend {

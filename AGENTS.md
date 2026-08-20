@@ -51,3 +51,12 @@ Implementation will surface things the design didn't foresee. When that happens:
 - One way to do things; if two APIs can express the same operation, one of them is wrong.
 - Prefer the boring solution. This project rejects speculative abstraction (no backend
   traits, no plugin-format abstraction, no crate splits).
+- **`unsafe` lives at the hardware edge and nowhere else.** Today that means `io/client.rs`,
+  which binds `pw_filter` because `pipewire-rs` does not wrap it. Rules for that file, and for
+  any that joins it: every `unsafe` block carries a `SAFETY:` comment naming the invariant it
+  leans on, the module doc states those invariants up front, and there is **no
+  `unsafe impl Send`/`Sync`** — restructure so the objects never cross threads instead. If a
+  change seems to need `unsafe` in a pure-logic module, that is a design smell; flag it.
+- FFI cannot be unit-tested, so it is not done until it has been *measured* against a running
+  system, and the measurement goes into the increment's record in `IMPLEMENTATION_PLAN.md`.
+  "It compiles and looks right" is not a result.

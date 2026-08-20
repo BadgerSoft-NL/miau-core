@@ -244,3 +244,57 @@ fn event_source_node_emits_sample_accurate_events() {
         ]
     );
 }
+
+/// The io edge reads events out of the graph the same way it reads audio — this is the only way
+/// out for a MIDI-only shell, which has no audio buffer to pull.
+#[test]
+fn events_output_exposes_an_event_port_to_the_io_edge() {
+    use crate::time::SampleOffset;
+
+    let tempo = TempoMap::constant(SR, 120.0).unwrap(); // 25 samples/tick
+    let clip = Clip::new(
+        Tick::new(1000),
+        vec![(
+            Tick::new(10),
+            Event::NoteOn {
+                channel: 3,
+                key: 48,
+                velocity: 90,
+            },
+        )],
+    );
+    let lane = Arc::new(Lane::new(vec![Placement::new(Tick::new(0), clip)]));
+
+    let mut graph = Graph::new(512);
+    let src = graph.add_node(EventSourceNode::new(ClipPlayer::new(lane)));
+    graph.commit();
+
+    graph.process(&ProcessContext {
+        frames: 500,
+        sample_rate: SR,
+        block_start: SamplePos::new(0),
+        ticks: TickRange::new(Tick::new(0), Tick::new(20)),
+        tempo: Some(&tempo),
+    });
+
+    assert_eq!(
+        graph.events_output(src, 0),
+        Some(
+            &[(
+                SampleOffset::new(250),
+                Event::NoteOn {
+                    channel: 3,
+                    key: 48,
+                    velocity: 90
+                }
+            )][..]
+        )
+    );
+
+    // An audio port, an out-of-range port and a dead handle all say "nothing here", never panic.
+    assert_eq!(graph.events_output(src, 1), None);
+    let gone = graph.add_node(Gain::new(1.0));
+    graph.remove_node(gone);
+    graph.commit();
+    assert_eq!(graph.events_output(gone, 0), None);
+}

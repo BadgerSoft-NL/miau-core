@@ -186,26 +186,21 @@ pub(super) fn translate_in(buf: &mut EventBuffer, time: u32, event: Event) {
             Pckn::new(0u16, u16::from(channel), u16::from(key), Match::All),
             f64::from(velocity) / 127.0,
         )),
-        Event::Control {
-            channel,
-            controller,
-            value,
-        } => buf.push(&MidiEvent::new(
-            time,
-            0,
-            [0xB0 | (channel & 0x0F), controller & 0x7F, value & 0x7F],
-        )),
-        Event::PitchBend { channel, value } => {
-            let bits = (i32::from(value) + 8192).clamp(0, 16_383) as u16;
-            buf.push(&MidiEvent::new(
-                time,
-                0,
-                [
-                    0xE0 | (channel & 0x0F),
-                    (bits & 0x7F) as u8,
-                    (bits >> 7) as u8,
-                ],
-            ));
+        // Everything else that has a wire form goes as a raw MIDI 1.0 event; CLAP has no
+        // dedicated controller event. The bytes come from the io encoder rather than being
+        // rebuilt here, so the two can never drift apart (invariant 1 allows `clap/` to use
+        // `io/`). Two-byte messages are zero-padded, which is what CLAP's fixed [u8; 3] wants.
+        Event::PolyPressure { .. }
+        | Event::Control { .. }
+        | Event::ProgramChange { .. }
+        | Event::ChannelPressure { .. }
+        | Event::PitchBend { .. } => {
+            if let Some(message) = crate::io::encode_midi(&event) {
+                let mut bytes = [0_u8; 3];
+                let encoded = message.as_bytes();
+                bytes[..encoded.len()].copy_from_slice(encoded);
+                buf.push(&MidiEvent::new(time, 0, bytes));
+            }
         }
         Event::ParamChange { param, value } => {
             // `ClapId` can represent every `u32` except `u32::MAX`; skip that one rather than panic.

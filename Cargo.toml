@@ -16,7 +16,10 @@ categories = ["multimedia::audio"]
 blake3 = "1"
 clack-extensions = { version = "0.1.0", features = ["audio-ports", "clack-host", "note-ports", "params", "state"] }
 clack-host = "0.1.0"
-pipewire = "0.10.0"
+# `v0_3_49` is a feature on an existing dependency, not a new one: it exposes
+# `Buffer::requested()`, which is how a MIDI-only output stream learns its block length — there
+# is no sample buffer to measure. PipeWire 0.3.49 is from 2022, so this raises no real floor.
+pipewire = { version = "0.10.0", features = ["v0_3_49"] }
 rtrb = "0.3.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
