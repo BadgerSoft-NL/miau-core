@@ -1,22 +1,28 @@
 //! The PipeWire edge: the engine is *pulled* from PipeWire's process callback — the core has no
-//! audio thread of its own. This module exposes ports and converts at the edge; hardware routing
-//! stays external (qpwgraph). Raw MIDI becomes typed events here and nowhere deeper (invariant 6,
-//! see [`parse_midi`]/[`parse_ump`]).
+//! audio thread of its own. This module exposes ports and converts at the edge. Raw MIDI becomes
+//! typed events here and nowhere deeper (invariant 6, see [`parse_midi`]/[`parse_ump`]).
 //!
 //! [`Client`] is the way in and out: one PipeWire node with any mix of MIDI and audio ports,
 //! driven by a single process callback on a thread of its own. [`MidiSink`] writes a block's
 //! events to a port; [`MidiControl`] reads them back.
+//!
+//! [`Patchbay`] is the view around that node: which MIDI destinations the machine has, and which of
+//! them our ports are linked to. A shell that wants to do its own routing — because the choice
+//! belongs with the track rather than with a patchbay — uses it instead of leaving the wiring to
+//! qpwgraph. It reads the graph and applies links; *which* links is the shell's decision alone.
 
 use pipewire as pw;
 use pw::spa;
 
 mod client;
 mod midi;
+mod patchbay;
 pub use client::{Block, Client, ClientBuilder};
 pub use midi::{
     MidiMessage, encode_midi, encode_sync, encode_sync_ump, encode_ump, parse_midi, parse_sync,
     parse_sync_ump, parse_ump,
 };
+pub use patchbay::{MidiDestination, Patchbay};
 
 /// The PipeWire error type, surfaced from setup and connection.
 pub use pipewire::Error;

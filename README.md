@@ -32,13 +32,14 @@ The architecture is a contract, not a suggestion:
 transport, arrangement (lanes/clips), the realtime audio graph, PipeWire I/O, CLAP hosting,
 document persistence (ZIP container + `.miauclip` exchange format) and offline time-stretching.
 MIDI 1.0 channel voice is covered completely in both directions, one `io::Client` carries any
-mix of MIDI and audio ports on a single node with a start/stop lifecycle, and the transport is a
-MIDI clock master. 86 tests; realtime paths are lock- and allocation-free per the invariants.
+mix of MIDI and audio ports on a single node with a start/stop lifecycle, `io::Patchbay` reads
+the surrounding PipeWire graph and makes links on request, and the transport is a MIDI clock
+master. 90 tests; realtime paths are lock- and allocation-free per the invariants.
 
 ## Examples
 
-Five examples double as a guided tour (all need a running PipeWire session, and all expose
-ports you route yourself — the core routes nothing):
+Six examples double as a guided tour (all need a running PipeWire session; all but the last
+expose ports you route yourself — the core decides no routing of its own):
 
 - `cargo run --example beep` — a sine through the graph; route "miau beep" to your speakers.
 - `cargo run --example midi_monitor` — typed events from a hardware MIDI keyboard; route your
@@ -49,6 +50,8 @@ ports you route yourself — the core routes nothing):
   input read in the same block: what one client with many ports buys you.
 - `cargo run --example clap_synth` — play a CLAP synth (default: Surge XT) live via MIDI, with
   a parameter-automation LFO; needs a CLAP plugin in `~/.clap` or `/usr/lib/clap`.
+- `cargo run --example midi_link` — list the machine's MIDI destinations and link one from
+  inside the process instead of reaching for a patchbay. Pass a printed key to link to it.
 
 ## License
 

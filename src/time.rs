@@ -276,6 +276,27 @@ impl TempoMap {
         Tick::new(seg.start_tick + offset.round() as u64)
     }
 
+    /// Where a tick lands inside the block being rendered, as a sample offset.
+    ///
+    /// The bridge between musical time and the wire: a scheduler walks slices of a block, and
+    /// every event it emits needs an offset PipeWire can attach it to. `start` is the first
+    /// tick of the current slice and `at` the sample offset that slice begins at — both come
+    /// straight from [`BlockStep::Play`]; `frames` is the block length.
+    ///
+    /// The result is clamped into the block. A slice boundary can land exactly on `frames`,
+    /// and an offset past the end is not something the wire can express.
+    ///
+    /// [`BlockStep::Play`]: crate::transport::BlockStep::Play
+    #[must_use]
+    pub fn offset_in_block(&self, start: Tick, at: u32, frames: u32, tick: Tick) -> u32 {
+        let delta = self
+            .tick_to_sample(tick)
+            .get()
+            .saturating_sub(self.tick_to_sample(start).get());
+        let last = u64::from(frames.saturating_sub(1));
+        u32::try_from((u64::from(at) + delta).min(last)).unwrap_or(0)
+    }
+
     /// Iterates the tempo segments overlapping `range`, clipped to it.
     ///
     /// Each [`TempoSpan`] carries a single-tempo sub-range of the block, so a scheduler can
@@ -370,6 +391,31 @@ mod tests {
         assert_eq!(map.tick_to_sample(Tick::new(1440)), SamplePos::new(48_000));
         // And a position still inside the first segment stays on the 25 samples/tick rate.
         assert_eq!(map.tick_to_sample(Tick::new(480)), SamplePos::new(12_000));
+    }
+
+    #[test]
+    fn offset_in_block_places_ticks_and_clamps_at_the_end() {
+        // 120 BPM @ 48 kHz → 25 samples per tick.
+        let map = TempoMap::constant(48_000, 120.0).unwrap();
+        let start = Tick::new(1000);
+        // The slice starts 64 samples into a 512-sample block.
+        assert_eq!(map.offset_in_block(start, 64, 512, start), 64);
+        assert_eq!(map.offset_in_block(start, 64, 512, Tick::new(1004)), 164);
+        // Past the block: an offset the wire cannot express, clamped to the last sample.
+        assert_eq!(map.offset_in_block(start, 64, 512, Tick::new(2000)), 511);
+        // A tick before the slice cannot move backwards either.
+        assert_eq!(map.offset_in_block(start, 64, 512, Tick::new(0)), 64);
+    }
+
+    #[test]
+    fn offset_in_block_follows_the_sample_rate() {
+        // The same music at a different rate lands on a different sample offset. This is the
+        // whole reason a shell must not assume 48 kHz: at 44.1 kHz a tick is ~8% closer.
+        let start = Tick::new(0);
+        let at_48 = TempoMap::constant(48_000, 120.0).unwrap();
+        let at_441 = TempoMap::constant(44_100, 120.0).unwrap();
+        assert_eq!(at_48.offset_in_block(start, 0, 1024, Tick::new(40)), 1000);
+        assert_eq!(at_441.offset_in_block(start, 0, 1024, Tick::new(40)), 919);
     }
 
     #[test]

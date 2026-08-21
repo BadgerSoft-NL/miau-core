@@ -60,15 +60,8 @@ struct BlockSink<'a> {
 impl BlockSink<'_> {
     /// The sample offset within the block for a tick in the current slice.
     fn offset_of(&self, tick: Tick) -> u32 {
-        let delta = self
-            .tempo
-            .tick_to_sample(tick)
-            .get()
-            .saturating_sub(self.tempo.tick_to_sample(self.start).get());
-        // Clamp into the block: a slice boundary can land exactly on `frames`, and an offset past
-        // the end is not a thing the wire can express.
-        let last = u64::from(self.frames.saturating_sub(1));
-        (u64::from(self.at) + delta).min(last) as u32
+        self.tempo
+            .offset_in_block(self.start, self.at, self.frames, tick)
     }
 }
 

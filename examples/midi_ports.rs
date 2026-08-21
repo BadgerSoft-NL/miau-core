@@ -40,13 +40,9 @@ impl EventSink for BlockSink<'_, '_> {
         if let Some(tracker) = self.tracker.as_deref_mut() {
             tracker.observe(&event);
         }
-        let delta = self
+        let offset = self
             .tempo
-            .tick_to_sample(at)
-            .get()
-            .saturating_sub(self.tempo.tick_to_sample(self.start).get());
-        let last = u64::from(self.out.frames().saturating_sub(1));
-        let offset = (u64::from(self.at) + delta).min(last) as u32;
+            .offset_in_block(self.start, self.at, self.out.frames(), at);
         self.out.push(offset, &event);
     }
 }

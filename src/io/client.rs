@@ -45,6 +45,8 @@ use super::{Error, MidiControl, MidiKind, MidiSink, for_each_control};
 enum Command {
     /// Leave the main loop and tear the filter down.
     Stop,
+    /// Ask the server for a different block size by updating `node.latency`.
+    Latency { frames: u32, rate: u32 },
 }
 
 /// A MIDI port's realtime state for the current block.
@@ -89,6 +91,8 @@ struct Inner {
 /// closure that receives it must be too (invariant 11 — no allocation, no locks, no I/O).
 pub struct Block<'a> {
     frames: u32,
+    rate: u32,
+    nsec: u64,
     kind: MidiKind,
     midi_in: &'a mut [MidiPort],
     midi_out: &'a mut [MidiPort],
@@ -101,6 +105,29 @@ impl Block<'_> {
     #[must_use]
     pub fn frames(&self) -> u32 {
         self.frames
+    }
+
+    /// The graph's sample rate in Hz, as reported by the driver's clock.
+    ///
+    /// This is the rate [`frames`](Block::frames) is counted in, and the rate a [`TempoMap`]
+    /// must be built with for musical time to line up with wall time. May be `0` on a server
+    /// that does not fill the clock's rate in; a caller should treat that as "unknown" rather
+    /// than divide by it.
+    ///
+    /// [`TempoMap`]: crate::time::TempoMap
+    #[must_use]
+    pub fn rate(&self) -> u32 {
+        self.rate
+    }
+
+    /// When this cycle started, in nanoseconds on `CLOCK_MONOTONIC`.
+    ///
+    /// A real instant in the recent past, straight from the driver's clock. A shell that
+    /// timestamps live input against the same clock can turn "how long ago was the key hit"
+    /// into a sample offset within the block instead of placing everything at offset 0.
+    #[must_use]
+    pub fn nsec(&self) -> u64 {
+        self.nsec
     }
 
     /// The wire encoding this client's MIDI ports use.
@@ -374,10 +401,14 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa::sys::spa_
         return;
     }
     // SAFETY: PipeWire guarantees a valid position area for the duration of the callback.
-    let frames = unsafe { (*position).clock.duration } as u32;
+    let clock = unsafe { &(*position).clock };
+    let frames = clock.duration as u32;
     if frames == 0 {
         return;
     }
+    // The clock's rate is a fraction; for audio it is 1/rate, so the denominator is the Hz.
+    let rate = clock.rate.denom;
+    let nsec = clock.nsec;
 
     let kind = inner.kind;
     // SAFETY: we are inside `process` on a connected filter; all port handles are live.
@@ -400,6 +431,8 @@ unsafe extern "C" fn on_process(data: *mut c_void, position: *mut spa::sys::spa_
         } = inner;
         let mut block = Block {
             frames,
+            rate,
+            nsec,
             kind,
             midi_in,
             midi_out,
@@ -438,6 +471,7 @@ pub struct ClientBuilder {
     audio_in: usize,
     audio_out: usize,
     kind: MidiKind,
+    latency: Option<u32>,
 }
 
 impl ClientBuilder {
@@ -452,6 +486,7 @@ impl ClientBuilder {
             audio_in: 0,
             audio_out: 0,
             kind: MidiKind::Ump,
+            latency: None,
         }
     }
 
@@ -491,6 +526,19 @@ impl ClientBuilder {
     #[must_use]
     pub fn midi_kind(mut self, kind: MidiKind) -> Self {
         self.kind = kind;
+        self
+    }
+
+    /// Asks the server for blocks of `frames` samples by setting `node.latency`.
+    ///
+    /// A request, not a guarantee: the server weighs it against every other node and its
+    /// quantum limits, and `node.latency` is a fraction it scales to the graph's rate — the
+    /// request is written against 48 kHz here, so on a 44.1 kHz graph the resulting block is
+    /// proportionally smaller. What was actually granted is whatever [`Block::frames`] says.
+    /// To adjust at runtime — when the real rate is known — use [`Client::set_latency`].
+    #[must_use]
+    pub fn latency(mut self, frames: u32) -> Self {
+        self.latency = Some(frames);
         self
     }
 
@@ -554,6 +602,16 @@ impl Client {
     #[must_use]
     pub fn node_id(&self) -> u32 {
         self.node_id
+    }
+
+    /// Asks the server for blocks of `frames` samples at `rate` Hz, replacing any earlier
+    /// request.
+    ///
+    /// `rate` should be the graph's real rate as reported by [`Block::rate`], so the fraction
+    /// `frames/rate` means exactly `frames` samples. The request is applied on the client
+    /// thread; the granted size shows up in [`Block::frames`] a few cycles later.
+    pub fn set_latency(&self, frames: u32, rate: u32) {
+        let _ = self.tx.send(Command::Latency { frames, rate });
     }
 
     /// Stops the client and waits for its thread to finish.
@@ -664,7 +722,7 @@ fn run(
         (true, false) => "Capture",
         _ => "Playback",
     };
-    let props = pw::properties::properties! {
+    let mut props = pw::properties::properties! {
         *pw::keys::MEDIA_TYPE => media_type,
         *pw::keys::MEDIA_CATEGORY => category,
         *pw::keys::MEDIA_ROLE => "Music",
@@ -673,6 +731,11 @@ fn run(
         // it is a bug, not a feature.
         *pw::keys::NODE_ALWAYS_PROCESS => "true",
     };
+    if let Some(frames) = spec.latency {
+        // Written against 48 kHz because the real rate is not known before the first block; the
+        // server scales the fraction to the graph's rate. `set_latency` can correct it later.
+        props.insert(*pw::keys::NODE_LATENCY, format!("{frames}/48000"));
+    }
 
     // SAFETY: the loop outlives the filter (both are dropped at the end of this function), the
     // events box is kept alive alongside it, and `inner` is a stable heap address.
@@ -773,7 +836,27 @@ fn run(
     }
 
     let quit = mainloop.clone();
-    let _receiver = rx.attach(mainloop.loop_(), move |Command::Stop| quit.quit());
+    // Captured as an address, not a pointer: a raw pointer would keep this closure from being
+    // moved across the attach boundary on some toolchains, and the loop thread is the only
+    // place it is turned back into one. The filter outlives the loop, so it is live here.
+    let filter_addr = filter as usize;
+    let _receiver = rx.attach(mainloop.loop_(), move |command| match command {
+        Command::Stop => quit.quit(),
+        Command::Latency { frames, rate } => {
+            let props = pw::properties::properties! {
+                *pw::keys::NODE_LATENCY => format!("{frames}/{rate}"),
+            };
+            // SAFETY: this runs on the loop thread while the loop runs, and the filter is not
+            // destroyed until after `mainloop.run()` returns.
+            unsafe {
+                pw_sys::pw_filter_update_properties(
+                    filter_addr as *mut pw_sys::pw_filter,
+                    ptr::null_mut(),
+                    props.dict().as_raw_ptr(),
+                );
+            }
+        }
+    });
 
     // Startup is reported from `on_state_changed` once the filter actually reaches Paused — the
     // node id does not exist before that. Running the loop is what makes that happen.
