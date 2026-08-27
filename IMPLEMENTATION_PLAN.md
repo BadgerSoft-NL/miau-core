@@ -266,6 +266,40 @@ Also closed here: `audio_in` on the client had been written but never measured. 
 it reported peak **0.200** — exactly that example's `Gain::new(0.2)` on a unit sine — and, like
 every other port, 0 buffers until linked.
 
+### `io/` patchbay both ways — linking a source into our own input
+
+The patchbay could route outward and only outward. It knew `MidiDestination` (an input belonging
+to someone else) and linked from `midi_out_N`; a keyboard's *output* did not exist for it, and our
+own `midi_in_N` was discarded in `State::global` before it was ever looked at. A shell could read
+MIDI in — `ClientBuilder::midi_in` and `Block::midi_in` were built in the many-ports increment —
+but could not connect anything to it without an external patchbay, which is exactly the dependency
+this module exists to remove.
+
+- **`MidiDestination` became `MidiEndpoint`**, one type for both lists. The two were field-for-
+  field identical, and a separate `MidiSource` would have bought no type safety: a link is named
+  by key, not by struct, so nothing can be passed to the wrong side anyway (invariant 10, one way
+  to do things). `Patchbay::sources()` sits beside `destinations()`; which list an endpoint came
+  from is what says which way it faces.
+- **`set_links` takes `Vec<LinkWish>`**, covering both directions in one call. Not a second
+  setter: the thread keeps a single map of the links it owns, and two calls each claiming to be
+  "the whole picture" would erase each other's half. Direction is part of a wish's identity —
+  a cable exposes the same key on both sides, so without it the two links collapse into one map
+  entry. Asserted by `direction_is_part_of_a_wishs_identity`.
+- **`split_name` strips `(capture)` as well as `(playback)`**, so one cable reads the same in a
+  menu whichever side of it you are looking at.
+
+**Done when:** a source list appears, a wish links a source into `midi_in_N`, and the wish
+survives its device being switched off and on — the same key-not-id rule the outgoing side
+already had.
+
+*Verified* on PipeWire 1.6.8 by looping the process through ALSA's Midi Through: `midi_link` with
+the same key as both destination and source produced two links in `pw-link -l`
+(`miau midi link:midi_out_0 -> Midi Through (playback)` and
+`Midi Through (capture) -> miau midi link:midi_in_0`), and the example's one-note-per-second
+came back around at exactly one control per second. 20 sources listed beside 20 destinations,
+keyed identically across the two — which is why a shell must keep its saved source settings in a
+map of their own.
+
 ### Still open: following an external clock
 
 The core can now *drive* other gear but not *follow* it. That is not a missing function, it is a

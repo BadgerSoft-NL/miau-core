@@ -22,7 +22,7 @@ pub use midi::{
     MidiMessage, encode_midi, encode_sync, encode_sync_ump, encode_ump, parse_midi, parse_sync,
     parse_sync_ump, parse_ump,
 };
-pub use patchbay::{MidiDestination, Patchbay};
+pub use patchbay::{Direction, LinkWish, MidiEndpoint, Patchbay};
 
 /// The PipeWire error type, surfaced from setup and connection.
 pub use pipewire::Error;

@@ -1,30 +1,40 @@
 //! Reading the PipeWire graph and making links in it.
 //!
 //! [`Client`](super::Client) owns one node and its ports; this owns the view *around* that node —
-//! which MIDI destinations the machine has, and which of them our output ports are wired to. It is
-//! a second connection to the server on a thread of its own, because a PipeWire loop is not
-//! `Send` and the realtime callback must never wait on graph traffic.
+//! which MIDI endpoints the machine has, and which of them our ports are wired to. It is a second
+//! connection to the server on a thread of its own, because a PipeWire loop is not `Send` and the
+//! realtime callback must never wait on graph traffic.
 //!
 //! "Graph" here means PipeWire's, not [`crate::graph`]: this module is about wires between
 //! processes on the machine, that one is about nodes inside the engine. Hence the name.
 //!
-//! Routing is a shell's decision, so this module carries no policy: it does not rank
-//! destinations, hide any, or connect anything on its own. It reports what exists and applies
-//! exactly the set of links it is handed.
+//! Routing is a shell's decision, so this module carries no policy: it does not rank endpoints,
+//! hide any, or connect anything on its own. It reports what exists and applies exactly the set of
+//! links it is handed.
+//!
+//! # Both directions, one wish list
+//!
+//! A [`destination`](Patchbay::destinations) is a MIDI input belonging to something else — where
+//! our `midi_out_N` ports send. A [`source`](Patchbay::sources) is a MIDI output belonging to
+//! something else — a keyboard, another app — which our `midi_in_N` ports can be fed from. Both
+//! are [`MidiEndpoint`]; which list it came from says which way it faces.
+//!
+//! [`set_links`](Patchbay::set_links) speaks in [`LinkWish`], and takes **one list covering both
+//! directions**. Not two setters: the thread keeps a single map of the links it owns, and two
+//! calls that each claim to be "the whole picture" would erase each other's half.
 //!
 //! # What is stable and what is not
 //!
 //! Object ids in the graph are per session — a device that comes back after being switched off
-//! gets new ones, descending and with gaps. A destination is therefore addressed by its
-//! [`key`](MidiDestination::key), taken from `port.alias`, which survives restarts and
-//! reconnections. That is also what [`set_links`](Patchbay::set_links) speaks in: a wish for a
-//! device that is currently absent stays on file, and the link is made the moment the device
-//! reappears.
+//! gets new ones, descending and with gaps. An endpoint is therefore addressed by its
+//! [`key`](MidiEndpoint::key), taken from `port.alias`, which survives restarts and reconnections.
+//! That is also what a [`LinkWish`] names: a wish for a device that is currently absent stays on
+//! file, and the link is made the moment the device reappears.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 
 use pipewire as pw;
@@ -37,9 +47,10 @@ use super::Error;
 const DSP_MIDI: &str = "8 bit raw midi";
 const DSP_UMP: &str = "32 bit raw UMP";
 
-/// A MIDI destination: an input port belonging to something else on this machine.
+/// A MIDI port belonging to something else on this machine: a destination we can send to, or a
+/// source we can be fed from. Which one it is follows from the list it came out of.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MidiDestination {
+pub struct MidiEndpoint {
     /// Object id in the graph. Used to make a link; never store it — see the module docs.
     pub id: u32,
     /// The node the port sits on. A link recipe wants both.
@@ -52,10 +63,63 @@ pub struct MidiDestination {
     pub name: String,
 }
 
+/// Which way a link runs, seen from our own node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Direction {
+    /// One of our `midi_out_N` ports into a destination's input.
+    ToDestination,
+    /// A source's output into one of our `midi_in_N` ports.
+    FromSource,
+}
+
+/// One link that should exist: which of our ports, which way, and which endpoint.
+///
+/// Named by key rather than by object id, so it outlives the device being switched off — see the
+/// module docs.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LinkWish {
+    /// The `N` in `midi_out_N` or `midi_in_N`, depending on `direction`.
+    pub port: usize,
+    /// Which way the link runs, and therefore which of our port sets `port` indexes.
+    pub direction: Direction,
+    /// The [`key`](MidiEndpoint::key) of the endpoint at the far end.
+    pub key: String,
+}
+
+impl LinkWish {
+    /// From our `midi_out_{port}` to the destination with this key.
+    #[must_use]
+    pub fn to_destination(port: usize, key: impl Into<String>) -> Self {
+        Self {
+            port,
+            direction: Direction::ToDestination,
+            key: key.into(),
+        }
+    }
+
+    /// From the source with this key into our `midi_in_{port}`.
+    #[must_use]
+    pub fn from_source(port: usize, key: impl Into<String>) -> Self {
+        Self {
+            port,
+            direction: Direction::FromSource,
+            key: key.into(),
+        }
+    }
+}
+
 enum Command {
-    /// The full set of wanted links, as `(our output port index, destination key)`.
-    Links(Vec<(usize, String)>),
+    /// The full set of wanted links, both directions together.
+    Links(Vec<LinkWish>),
     Stop,
+}
+
+/// Both lists as the thread last saw them. One mutex rather than two, so a reader can never catch
+/// the two halves a sweep apart.
+#[derive(Default)]
+struct Published {
+    destinations: Vec<MidiEndpoint>,
+    sources: Vec<MidiEndpoint>,
 }
 
 /// A live view of the graph around one node, and the links this client owns in it.
@@ -66,17 +130,18 @@ pub struct Patchbay {
     tx: pw::channel::Sender<Command>,
     /// What the thread last saw. A mutex is fine here — this is the control side, not the
     /// realtime one.
-    destinations: Arc<Mutex<Vec<MidiDestination>>>,
+    published: Arc<Mutex<Published>>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl Patchbay {
     /// Connects to the server and starts watching, on a thread of its own.
     ///
-    /// `own_node` is the node whose output ports may be linked from — in practice
+    /// `own_node` is the node whose ports may be linked — in practice
     /// [`Client::node_id`](super::Client::node_id). Ports on that node named `midi_out_N` are
-    /// recognised as link sources, indexed by `N`; every MIDI input port elsewhere becomes a
-    /// destination.
+    /// recognised as link sources and `midi_in_N` as link targets, both indexed by `N`; every
+    /// other MIDI port on the machine becomes a [`destination`](Patchbay::destinations) or a
+    /// [`source`](Patchbay::sources).
     ///
     /// Blocks until the connection stands, like [`ClientBuilder::start`](super::ClientBuilder),
     /// so do not call it from a UI thread.
@@ -85,11 +150,11 @@ impl Patchbay {
     /// Returns a [`pipewire::Error`] if the thread cannot be spawned, the server cannot be
     /// reached, or it does not answer within five seconds.
     pub fn start(own_node: u32) -> Result<Self, Error> {
-        let destinations = Arc::new(Mutex::new(Vec::new()));
+        let published = Arc::new(Mutex::new(Published::default()));
         let (tx, rx) = pw::channel::channel::<Command>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), Error>>();
 
-        let shared = Arc::clone(&destinations);
+        let shared = Arc::clone(&published);
         let thread = std::thread::Builder::new()
             .name("miau-patchbay".to_owned())
             .spawn(move || run(own_node, shared, rx, &ready_tx))
@@ -98,7 +163,7 @@ impl Patchbay {
         match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(Ok(())) => Ok(Self {
                 tx,
-                destinations,
+                published,
                 thread: Some(thread),
             }),
             Ok(Err(error)) => {
@@ -113,27 +178,44 @@ impl Patchbay {
         }
     }
 
-    /// The MIDI destinations as they stand right now, ordered by device and then port name.
+    /// The MIDI destinations as they stand right now — inputs elsewhere, where our `midi_out_N`
+    /// ports can send. Ordered by device and then port name.
     ///
     /// A snapshot, not a subscription: the list changes when hardware is switched on or off,
     /// which is a few times a day, so asking now and then costs less than an event stream. The
     /// order is stable, so a port appearing does not reshuffle what is already on screen.
     #[must_use]
-    pub fn destinations(&self) -> Vec<MidiDestination> {
-        self.destinations
+    pub fn destinations(&self) -> Vec<MidiEndpoint> {
+        self.published
             .lock()
-            .map(|list| list.clone())
+            .map(|p| p.destinations.clone())
             .unwrap_or_default()
     }
 
-    /// Sets which links should exist, as `(output port index, destination key)` pairs.
+    /// The MIDI sources as they stand right now — outputs elsewhere, which our `midi_in_N` ports
+    /// can be fed from. Same snapshot rules as [`destinations`](Patchbay::destinations).
+    ///
+    /// Several sources linked to one input port is a normal thing to want: the server merges
+    /// them, so two keyboards arrive on one port as one stream.
+    #[must_use]
+    pub fn sources(&self) -> Vec<MidiEndpoint> {
+        self.published
+            .lock()
+            .map(|p| p.sources.clone())
+            .unwrap_or_default()
+    }
+
+    /// Sets which links should exist, in both directions at once.
     ///
     /// Always the whole picture, never a change: the thread lays it beside what is actually
     /// there and makes up the difference. Nothing can drift out of step after a link that failed
     /// to materialise, and a wish whose device is absent simply waits.
     ///
+    /// One list for both directions on purpose — see the module docs. Passing only the outgoing
+    /// wishes takes the incoming ones away.
+    ///
     /// Returns immediately; the work happens on the graph thread.
-    pub fn set_links(&self, links: Vec<(usize, String)>) {
+    pub fn set_links(&self, links: Vec<LinkWish>) {
         let _ = self.tx.send(Command::Links(links));
     }
 }
@@ -148,9 +230,14 @@ impl Drop for Patchbay {
 }
 
 /// Splits `"mioXM: DIN 1 (playback)"` into device and port name.
+///
+/// Both suffixes, because the same device shows up twice: PipeWire marks an input port
+/// `(playback)` and an output port `(capture)`, and a source and a destination on one cable should
+/// read the same in a menu.
 fn split_name(port_name: &str, node_name: &str) -> (String, String) {
     let bare = port_name
         .strip_suffix(" (playback)")
+        .or_else(|| port_name.strip_suffix(" (capture)"))
         .unwrap_or(port_name)
         .trim();
     match bare.split_once(": ") {
@@ -169,13 +256,17 @@ struct State {
     nodes: BTreeMap<u32, String>,
     /// Our own output ports: the `N` from `midi_out_N` to the port's object id.
     outputs: BTreeMap<usize, u32>,
-    /// The destinations, by object id.
-    destinations: BTreeMap<u32, MidiDestination>,
-    wanted: BTreeSet<(usize, String)>,
+    /// Our own input ports: the `N` from `midi_in_N` to the port's object id.
+    inputs: BTreeMap<usize, u32>,
+    /// Inputs elsewhere, by object id.
+    destinations: BTreeMap<u32, MidiEndpoint>,
+    /// Outputs elsewhere, by object id.
+    sources: BTreeMap<u32, MidiEndpoint>,
+    wanted: BTreeSet<LinkWish>,
     /// The links that exist. Holding the proxy *is* the link: drop it and the server takes the
     /// link away. That is what we want — when the client goes, so does its routing.
-    links: BTreeMap<(usize, String), pw::link::Link>,
-    published: Arc<Mutex<Vec<MidiDestination>>>,
+    links: BTreeMap<LinkWish, pw::link::Link>,
+    published: Arc<Mutex<Published>>,
 }
 
 impl State {
@@ -206,22 +297,26 @@ impl State {
                     .unwrap_or(0);
                 let port_name = props.get(*pw::keys::PORT_NAME).unwrap_or_default();
 
-                // One of ours: remember which index it is.
-                if node == self.own_node && direction == "out" {
-                    if let Some(index) = port_name
-                        .strip_prefix("midi_out_")
-                        .and_then(|n| n.parse::<usize>().ok())
-                    {
-                        self.outputs.insert(index, g.id);
-                        return true;
-                    }
-                    return false;
+                // One of ours: remember which index it is, on whichever side it sits.
+                if node == self.own_node {
+                    let ours = match direction {
+                        "out" => port_name
+                            .strip_prefix("midi_out_")
+                            .and_then(|n| n.parse::<usize>().ok())
+                            .map(|index| (&mut self.outputs, index)),
+                        "in" => port_name
+                            .strip_prefix("midi_in_")
+                            .and_then(|n| n.parse::<usize>().ok())
+                            .map(|index| (&mut self.inputs, index)),
+                        _ => None,
+                    };
+                    let Some((map, index)) = ours else {
+                        return false;
+                    };
+                    map.insert(index, g.id);
+                    return true;
                 }
 
-                // A destination is a MIDI input belonging to someone else.
-                if direction != "in" || node == self.own_node {
-                    return false;
-                }
                 let node_name = self.nodes.get(&node).cloned().unwrap_or_default();
                 let (device, name) = split_name(port_name, &node_name);
                 // The alias is usually already "device:port", which is exactly what we want.
@@ -233,16 +328,19 @@ impl State {
                     .filter(|alias| alias.contains(':'))
                     .map(str::to_owned)
                     .unwrap_or_else(|| format!("{node_name}:{port_name}"));
-                self.destinations.insert(
-                    g.id,
-                    MidiDestination {
-                        id: g.id,
-                        node,
-                        key,
-                        device,
-                        name,
-                    },
-                );
+                let endpoint = MidiEndpoint {
+                    id: g.id,
+                    node,
+                    key,
+                    device,
+                    name,
+                };
+                // Someone else's input is a destination; their output is a source.
+                match direction {
+                    "in" => self.destinations.insert(g.id, endpoint),
+                    "out" => self.sources.insert(g.id, endpoint),
+                    _ => return false,
+                };
                 self.publish();
                 true
             }
@@ -255,72 +353,98 @@ impl State {
     /// the link does not come back when the device does.
     fn removed(&mut self, id: u32) -> bool {
         self.nodes.remove(&id);
-        if self.destinations.remove(&id).is_some() {
+        if self.destinations.remove(&id).is_some() || self.sources.remove(&id).is_some() {
             self.publish();
             return true;
         }
-        if let Some(index) = self
-            .outputs
-            .iter()
-            .find(|(_, port)| **port == id)
-            .map(|(index, _)| *index)
-        {
-            self.outputs.remove(&index);
-            return true;
+        for map in [&mut self.outputs, &mut self.inputs] {
+            if let Some(index) = map
+                .iter()
+                .find(|(_, port)| **port == id)
+                .map(|(index, _)| *index)
+            {
+                map.remove(&index);
+                return true;
+            }
         }
         false
     }
 
     fn publish(&self) {
-        if let Ok(mut out) = self.published.lock() {
-            let mut list: Vec<MidiDestination> = self.destinations.values().cloned().collect();
+        let Ok(mut out) = self.published.lock() else {
+            return;
+        };
+        let order = |list: &mut Vec<MidiEndpoint>| {
             list.sort_by(|a, b| (&a.device, &a.name).cmp(&(&b.device, &b.name)));
-            *out = list;
-        }
+        };
+        out.destinations = self.destinations.values().cloned().collect();
+        out.sources = self.sources.values().cloned().collect();
+        order(&mut out.destinations);
+        order(&mut out.sources);
     }
 
-    fn destination(&self, key: &str) -> Option<&MidiDestination> {
-        self.destinations.values().find(|d| d.key == key)
+    /// The endpoint at the far end of a wish, if it is switched on right now.
+    fn endpoint(&self, wish: &LinkWish) -> Option<&MidiEndpoint> {
+        let list = match wish.direction {
+            Direction::ToDestination => &self.destinations,
+            Direction::FromSource => &self.sources,
+        };
+        list.values().find(|e| e.key == wish.key)
+    }
+
+    /// Our own port for a wish, if the node has come up that far.
+    fn own_port(&self, wish: &LinkWish) -> Option<u32> {
+        let map = match wish.direction {
+            Direction::ToDestination => &self.outputs,
+            Direction::FromSource => &self.inputs,
+        };
+        map.get(&wish.port).copied()
     }
 
     /// Lays the wish beside what exists and makes up the difference.
     fn apply(&mut self, core: &pw::core::CoreRc) {
-        // Anything no longer wanted, or whose destination or source port has vanished: drop the
-        // proxy and the link is gone.
-        let stale: Vec<(usize, String)> = self
+        // Anything no longer wanted, or whose far end or own port has vanished: drop the proxy
+        // and the link is gone.
+        let stale: Vec<LinkWish> = self
             .links
             .keys()
-            .filter(|key| {
-                !self.wanted.contains(*key)
-                    || self.destination(&key.1).is_none()
-                    || !self.outputs.contains_key(&key.0)
+            .filter(|wish| {
+                !self.wanted.contains(*wish)
+                    || self.endpoint(wish).is_none()
+                    || self.own_port(wish).is_none()
             })
             .cloned()
             .collect();
-        for key in stale {
-            self.links.remove(&key);
+        for wish in stale {
+            self.links.remove(&wish);
         }
 
-        for (index, key) in self.wanted.clone() {
-            if self.links.contains_key(&(index, key.clone())) {
+        for wish in self.wanted.clone() {
+            if self.links.contains_key(&wish) {
                 continue;
             }
-            let (Some(from), Some(to)) = (
-                self.outputs.get(&index).copied(),
-                self.destination(&key).map(|d| (d.node, d.id)),
+            let (Some(ours), Some(theirs)) = (
+                self.own_port(&wish),
+                self.endpoint(&wish).map(|e| (e.node, e.id)),
             ) else {
-                // Destination is switched off, or our node is not complete yet. The wish stays;
+                // The far end is switched off, or our node is not complete yet. The wish stays;
                 // the next registry message tries again.
                 continue;
             };
+            // A link always reads output → input. Which of the two ends is ours is the whole
+            // difference between the two directions.
+            let (out_node, out_port, in_node, in_port) = match wish.direction {
+                Direction::ToDestination => (self.own_node, ours, theirs.0, theirs.1),
+                Direction::FromSource => (theirs.0, theirs.1, self.own_node, ours),
+            };
             let props = pw::properties::properties! {
-                *pw::keys::LINK_OUTPUT_NODE => self.own_node.to_string(),
-                *pw::keys::LINK_OUTPUT_PORT => from.to_string(),
-                *pw::keys::LINK_INPUT_NODE => to.0.to_string(),
-                *pw::keys::LINK_INPUT_PORT => to.1.to_string(),
+                *pw::keys::LINK_OUTPUT_NODE => out_node.to_string(),
+                *pw::keys::LINK_OUTPUT_PORT => out_port.to_string(),
+                *pw::keys::LINK_INPUT_NODE => in_node.to_string(),
+                *pw::keys::LINK_INPUT_PORT => in_port.to_string(),
             };
             if let Ok(link) = core.create_object::<pw::link::Link>("link-factory", &props) {
-                self.links.insert((index, key), link);
+                self.links.insert(wish, link);
             }
             // A link that cannot be created is not fatal: the rest of the routing still stands,
             // and the wish is retried on the next graph change.
@@ -331,7 +455,7 @@ impl State {
 /// The thread: connect, listen, link.
 fn run(
     own_node: u32,
-    published: Arc<Mutex<Vec<MidiDestination>>>,
+    published: Arc<Mutex<Published>>,
     rx: pw::channel::Receiver<Command>,
     ready: &mpsc::Sender<Result<(), Error>>,
 ) {
@@ -358,7 +482,9 @@ fn run(
         own_node,
         nodes: BTreeMap::new(),
         outputs: BTreeMap::new(),
+        inputs: BTreeMap::new(),
         destinations: BTreeMap::new(),
+        sources: BTreeMap::new(),
         wanted: BTreeSet::new(),
         links: BTreeMap::new(),
         published,
@@ -408,7 +534,7 @@ fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::split_name;
+    use super::{Direction, LinkWish, split_name};
 
     #[test]
     fn splits_device_from_port_name() {
@@ -422,6 +548,16 @@ mod tests {
         );
     }
 
+    /// The same cable shows up twice — `(playback)` for its input, `(capture)` for its output —
+    /// and both should read the same in a menu.
+    #[test]
+    fn strips_either_side_suffix() {
+        assert_eq!(
+            split_name("mioXM: DIN 1 (capture)", "mioXM"),
+            split_name("mioXM: DIN 1 (playback)", "mioXM")
+        );
+    }
+
     #[test]
     fn falls_back_to_the_node_when_the_port_names_no_device() {
         // The Bluetooth MIDI server names its port just "in".
@@ -429,5 +565,18 @@ mod tests {
             split_name("in", "bluez_midi.server"),
             ("bluez_midi.server".to_owned(), "in".to_owned())
         );
+    }
+
+    /// Port index and key are not enough to tell two wishes apart: the same cable can be both a
+    /// destination and a source, and `midi_out_0` and `midi_in_0` are different ports. If the
+    /// direction dropped out of the identity, one of the two links would silently replace the
+    /// other in the map.
+    #[test]
+    fn direction_is_part_of_a_wishs_identity() {
+        let out = LinkWish::to_destination(0, "mioXM:mioXM DIN 1");
+        let into = LinkWish::from_source(0, "mioXM:mioXM DIN 1");
+        assert_ne!(out, into);
+        assert_eq!(out.direction, Direction::ToDestination);
+        assert_eq!(into.direction, Direction::FromSource);
     }
 }
