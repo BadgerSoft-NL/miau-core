@@ -199,6 +199,23 @@ impl NoteTracker {
         self.sounding.iter().map(|b| b.count_ones()).sum()
     }
 
+    /// Which keys are sounding, as one bit per key, across all channels.
+    ///
+    /// For callers that reason about pitch rather than about a particular
+    /// voice — "is anything within a semitone of this note already playing"
+    /// — which channel a note came in on is not part of the question, and
+    /// asking [`is_sounding`](Self::is_sounding) 128 × 16 times to find out is
+    /// two thousand bit tests where sixteen ors will do. On the audio thread
+    /// that difference is worth an accessor.
+    ///
+    /// Bit *n* is key *n*, so the answer composes: masks from several trackers
+    /// or from a caller's own bookkeeping can be ored together and tested in
+    /// one go.
+    #[must_use]
+    pub fn sounding_keys(&self) -> u128 {
+        self.sounding.iter().fold(0, |acc, bits| acc | bits)
+    }
+
     /// Whether this exact note is sounding right now.
     ///
     /// The per-note counterpart of [`sounding_count`](Self::sounding_count),
@@ -259,6 +276,35 @@ mod tests {
         });
         assert!(!tracker.is_sounding(0, 60));
         assert!(tracker.is_sounding(1, 60));
+    }
+
+    #[test]
+    fn sounding_keys_folds_the_channels_together() {
+        let mut tracker = NoteTracker::new();
+        tracker.observe(&note_on(0, 60));
+        tracker.observe(&note_on(9, 61));
+
+        let keys = tracker.sounding_keys();
+        assert_eq!(keys, (1_u128 << 60) | (1_u128 << 61));
+        // Which channel a note arrived on is not part of the question.
+        assert!(keys & (1_u128 << 62) == 0);
+
+        tracker.observe(&Event::NoteOff {
+            channel: 9,
+            key: 61,
+            velocity: 0,
+        });
+        assert_eq!(tracker.sounding_keys(), 1_u128 << 60);
+    }
+
+    #[test]
+    fn sounding_keys_is_empty_when_nothing_sounds() {
+        let mut tracker = NoteTracker::new();
+        assert_eq!(tracker.sounding_keys(), 0);
+        tracker.observe(&note_on(3, 40));
+        let mut out = Collector::default();
+        tracker.flush(Tick::new(0), &mut out);
+        assert_eq!(tracker.sounding_keys(), 0);
     }
 
     #[test]
