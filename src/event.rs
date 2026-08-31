@@ -198,6 +198,23 @@ impl NoteTracker {
     pub fn sounding_count(&self) -> u32 {
         self.sounding.iter().map(|b| b.count_ones()).sum()
     }
+
+    /// Whether this exact note is sounding right now.
+    ///
+    /// The per-note counterpart of [`sounding_count`](Self::sounding_count),
+    /// added for callers that gate note-ons on what is already held — a delay
+    /// line refusing to double a key it is already playing, say. Without it
+    /// such a caller has to mirror this bitmask on its own, and a second copy
+    /// of "what is sounding" is exactly the state that drifts apart on the
+    /// first missed note-off.
+    ///
+    /// Channel and key are masked the same way [`observe`](Self::observe)
+    /// masks them, so an out-of-range argument answers about the note that
+    /// would actually have been recorded rather than panicking.
+    #[must_use]
+    pub fn is_sounding(&self, channel: u8, key: u8) -> bool {
+        self.sounding[(channel & 0x0F) as usize] & (1_u128 << (key & 0x7F)) != 0
+    }
 }
 
 #[cfg(test)]
@@ -220,6 +237,48 @@ mod tests {
             key,
             velocity: 100,
         }
+    }
+
+    #[test]
+    fn is_sounding_answers_per_note() {
+        let mut tracker = NoteTracker::new();
+        tracker.observe(&note_on(0, 60));
+        tracker.observe(&note_on(1, 60));
+
+        assert!(tracker.is_sounding(0, 60));
+        assert!(tracker.is_sounding(1, 60));
+        // Same key, a channel that never played it.
+        assert!(!tracker.is_sounding(2, 60));
+        // Same channel, a key that never played.
+        assert!(!tracker.is_sounding(0, 61));
+
+        tracker.observe(&Event::NoteOff {
+            channel: 0,
+            key: 60,
+            velocity: 0,
+        });
+        assert!(!tracker.is_sounding(0, 60));
+        assert!(tracker.is_sounding(1, 60));
+    }
+
+    #[test]
+    fn is_sounding_masks_like_observe_does() {
+        // Out of range is not a panic but the note that would have been
+        // recorded: channel 17 is channel 1, key 200 is key 72.
+        let mut tracker = NoteTracker::new();
+        tracker.observe(&note_on(17, 200));
+        assert!(tracker.is_sounding(17, 200));
+        assert!(tracker.is_sounding(1, 72));
+    }
+
+    #[test]
+    fn flush_leaves_nothing_sounding() {
+        let mut tracker = NoteTracker::new();
+        tracker.observe(&note_on(0, 60));
+        let mut out = Collector::default();
+        tracker.flush(Tick::new(0), &mut out);
+        assert!(!tracker.is_sounding(0, 60));
+        assert!(tracker.is_empty());
     }
 
     #[test]
