@@ -39,8 +39,8 @@ miau-core/src/
   graph/    — Node trait, ports, topology snapshots, schedule, buffer pool
   dsp       — TimeStretcher trait + default implementations (registry pattern)
   persist/  — Document types, ZIP container, .miauclip exchange format
-  io/       — PipeWire client (one node, N MIDI/audio ports), MIDI in and out, patchbay,
-              standard MIDI files (read/write)
+  io/       — PipeWire client (one node, N MIDI/audio ports), MIDI in and out, patchbay
+              (MIDI and audio), standard MIDI files (read/write)
   clap/     — CLAP hosting (ClapNode, discovery, state blobs)
 ```
 

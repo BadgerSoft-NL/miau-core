@@ -21,9 +21,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use miau_core::event::Event;
-use miau_core::io::{ClientBuilder, Error, LinkWish, MidiEndpoint, Patchbay};
+use miau_core::io::{ClientBuilder, Endpoint, Error, LinkWish, Patchbay, PortKind};
 
-fn print_list(title: &str, list: &[MidiEndpoint], marked: Option<&String>) {
+fn print_list(title: &str, list: &[Endpoint], marked: Option<&String>) {
     println!("{} {title}:", list.len());
     for endpoint in list {
         let mark = if Some(&endpoint.key) == marked {
@@ -95,11 +95,11 @@ fn main() -> Result<(), Error> {
     // only the outgoing link would drop the incoming one.
     let mut wishes = Vec::new();
     if let Some(key) = &destination {
-        wishes.push(LinkWish::to_destination(0, key.clone()));
+        wishes.push(LinkWish::midi_out(0, key.clone()));
         println!("linking midi_out_0 to {key}, one note per second.");
     }
     if let Some(key) = &source {
-        wishes.push(LinkWish::from_source(0, key.clone()));
+        wishes.push(LinkWish::midi_in(0, key.clone()));
         println!("linking {key} into midi_in_0, counting what arrives.");
     }
     if wishes.is_empty() {
@@ -111,7 +111,10 @@ fn main() -> Result<(), Error> {
     let mut previous = (Vec::new(), Vec::new());
     let mut reported = 0;
     loop {
-        let now = (patchbay.destinations(), patchbay.sources());
+        let now = (
+            patchbay.destinations(PortKind::Midi),
+            patchbay.sources(PortKind::Midi),
+        );
         if now != previous {
             print_list("destinations", &now.0, destination.as_ref());
             print_list("sources", &now.1, source.as_ref());

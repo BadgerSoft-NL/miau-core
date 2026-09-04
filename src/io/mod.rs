@@ -30,7 +30,7 @@ pub use midi::{
     MidiMessage, encode_midi, encode_sync, encode_sync_ump, encode_ump, parse_midi, parse_sync,
     parse_sync_ump, parse_ump,
 };
-pub use patchbay::{Direction, LinkWish, MidiEndpoint, Patchbay};
+pub use patchbay::{Direction, Endpoint, LinkWish, Patchbay, PortKind};
 pub use smf::{SmfError, SmfFile, SmfTrack, read_smf, write_smf};
 
 /// The PipeWire error type, surfaced from setup and connection.
