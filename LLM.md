@@ -39,7 +39,8 @@ miau-core/src/
   graph/    — Node trait, ports, topology snapshots, schedule, buffer pool
   dsp       — TimeStretcher trait + default implementations (registry pattern)
   persist/  — Document types, ZIP container, .miauclip exchange format
-  io/       — PipeWire client (one node, N MIDI/audio ports), MIDI in and out, patchbay
+  io/       — PipeWire client (one node, N MIDI/audio ports), MIDI in and out, patchbay,
+              standard MIDI files (read/write)
   clap/     — CLAP hosting (ClapNode, discovery, state blobs)
 ```
 
@@ -65,7 +66,9 @@ stop and flag it instead of working around it.
    scheduling.** Newtypes everywhere — never bare integers for time.
 5. **EventSources are realtime-safe.** No allocations, no locks, no unbounded work inside
    `events_in`.
-6. **Raw MIDI bytes exist only at the io edge.** Inside the core, events are the typed enum.
+6. **Raw MIDI bytes exist only at the io edge.** Inside the core, events are the typed enum. The
+   wire and the `.mid` file are both that edge, and both convert through the same pair of
+   functions.
 7. **The core defines contracts and ships defaults; shells register alternatives under string
    IDs.** Unknown IDs degrade gracefully (fallback + warning), never crash.
 8. **Note-off hygiene is central.** The engine's note tracker flushes hanging notes on
@@ -158,6 +161,11 @@ so import needs no remapping — the target shell just allocates a placement.
 
 Not persisted: playhead, transport runtime state, buffer pools, compiled schedules — all
 derived. A document describes *what the music is*, not what the engine is doing.
+
+A standard MIDI file is **not** persistence and does not live here. It is someone else's format,
+read and written at the io edge (`io/smf.rs`), and it is explicitly allowed to lose what the core
+does not model — time signatures, lyrics, SysEx. Invariant 14 binds documents the core authored,
+not interchange with the rest of the world.
 
 ## What the core is not
 

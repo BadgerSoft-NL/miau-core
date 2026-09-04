@@ -16,6 +16,15 @@ categories = ["multimedia::audio"]
 blake3 = "1"
 clack-extensions = { version = "0.1.0", features = ["audio-ports", "clack-host", "note-ports", "params", "state"] }
 clack-host = "0.1.0"
+# io/smf: the chunk-and-delta-time layer of a standard MIDI file. Only the file *structure* is
+# borrowed — the byte↔`Event` mapping stays in `io/midi.rs`, where invariant 6 already put it, so
+# one place and only one decides what a status byte means. Chosen over hand-rolling because
+# running status, variable-length quantities and the format 0/1/2 split are exactly the kind of
+# fiddly, fully-specified work a dependency should carry.
+# `parallel` (its rayon-backed multi-track parse) is off: a thread pool is not something an audio
+# engine should acquire behind its caller's back, and a MIDI file is parsed once, off the audio
+# thread, where the milliseconds do not matter.
+midly = { version = "0.5", default-features = false, features = ["std"] }
 # `v0_3_49` is a feature on an existing dependency, not a new one: it exposes
 # `Buffer::requested()`, which is how a MIDI-only output stream learns its block length — there
 # is no sample buffer to measure. PipeWire 0.3.49 is from 2022, so this raises no real floor.

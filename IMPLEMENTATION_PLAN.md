@@ -300,6 +300,46 @@ came back around at exactly one control per second. 20 sources listed beside 20 
 keyed identically across the two — which is why a shell must keep its saved source settings in a
 map of their own.
 
+### `io/` standard MIDI files — the other edge
+
+The core could reach a wire and not a file. Every shell that wants to import a corpus or export
+what its user wrote had to grow its own SMF parser, which means every shell would decide again
+whether a note-on with velocity zero is a note-off — the exact question invariant 6 exists to
+answer once.
+
+- **`io/smf.rs`, not `persist/`.** A `.mid` is raw MIDI bytes, so it belongs at the io edge by
+  invariant 6. It is also not persistence: `persist/` must round-trip what it does not understand
+  (invariant 14), a promise that can only be made about a format we author. SMF reading drops
+  SysEx, time and key signatures, lyrics and markers, on purpose.
+- **The message layer is not duplicated.** `to_event`/`to_midly` route through `encode_midi` and
+  `parse_midi` — the file layer converts chunks and delta times, and the existing pair still
+  decides what a status byte means. The three bytes of detour cost nothing off the audio thread
+  and buy the guarantee that wire and file cannot drift apart.
+- **Ticks are rescaled to 960 on the absolute position, never on the delta.** A 384 PPQ file
+  rounds every other event; rescaling deltas would let that rounding accumulate down the track.
+  Asserted over a hundred beats by `an_odd_ppq_does_not_drift_down_the_track`.
+- **Tempo comes back as `Vec<TempoSegment>` and not a `TempoMap`**, because a map bakes in a
+  sample rate that a file does not have — the same split `persist/` already makes. The segments
+  are always valid input to `TempoMap::new`: a file without a tempo yields 120 BPM at tick 0, a
+  first tempo later than zero gets 120 put in front of it, and two tempi on one tick collapse to
+  the later one.
+- **SMPTE-timed files are refused** (`SmfError::Timecode`) rather than guessed at. Such a file
+  pins its events to wall-clock time and has no beat to rescale against, so every tick derived
+  from it would be a fiction (invariant 4).
+- **Writing is always format 1 with the tempo on its own leading track**, even for a single track
+  at a single tempo (invariant 10). A shell that has to guess which shape its own exporter
+  returns is a bug waiting to happen.
+- **New dependency: `midly`**, with `default-features = false` — its rayon-backed parallel parse
+  is off, because an audio engine should not acquire a thread pool behind its caller's back, and a
+  MIDI file is parsed once, off the audio thread.
+
+**Done when:** a file written by the core reads back event-for-event, a file written by someone
+else at another PPQ lands on the right beats, and the tempo it carries is accepted by `TempoMap`.
+
+*Verified* by 15 unit tests, several of them against hand-assembled bytes rather than against the
+writer's own output — a round trip through one's own encoder proves the two halves agree, not that
+either is right.
+
 ### Still open: following an external clock
 
 The core can now *drive* other gear but not *follow* it. That is not a missing function, it is a

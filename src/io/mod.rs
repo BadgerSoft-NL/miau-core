@@ -1,15 +1,22 @@
-//! The PipeWire edge: the engine is *pulled* from PipeWire's process callback — the core has no
-//! audio thread of its own. This module exposes ports and converts at the edge. Raw MIDI becomes
-//! typed events here and nowhere deeper (invariant 6, see [`parse_midi`]/[`parse_ump`]).
+//! The io edge: where raw MIDI bytes exist and nowhere deeper (invariant 6). Two kinds of edge
+//! meet here — the wire and the file — and both convert through the same
+//! [`parse_midi`]/[`encode_midi`] pair.
 //!
-//! [`Client`] is the way in and out: one PipeWire node with any mix of MIDI and audio ports,
-//! driven by a single process callback on a thread of its own. [`MidiSink`] writes a block's
-//! events to a port; [`MidiControl`] reads them back.
+//! **The wire.** The engine is *pulled* from PipeWire's process callback; the core has no audio
+//! thread of its own. [`Client`] is the way in and out: one PipeWire node with any mix of MIDI and
+//! audio ports, driven by a single process callback on a thread of its own. [`MidiSink`] writes a
+//! block's events to a port; [`MidiControl`] reads them back.
 //!
 //! [`Patchbay`] is the view around that node: which MIDI destinations the machine has, and which of
 //! them our ports are linked to. A shell that wants to do its own routing — because the choice
 //! belongs with the track rather than with a patchbay — uses it instead of leaving the wiring to
 //! qpwgraph. It reads the graph and applies links; *which* links is the shell's decision alone.
+//!
+//! **The file.** [`read_smf`]/[`write_smf`] convert a standard MIDI file to and from typed events
+//! at 960 PPQ. Nothing about a `.mid` is realtime, but its bytes are still MIDI bytes and so they
+//! belong at this edge and not in `persist/` — which is the engine's *own* document format and
+//! must round-trip what it does not understand (invariant 14), a promise no interchange format can
+//! be held to.
 
 use pipewire as pw;
 use pw::spa;
@@ -17,12 +24,14 @@ use pw::spa;
 mod client;
 mod midi;
 mod patchbay;
+mod smf;
 pub use client::{Block, Client, ClientBuilder};
 pub use midi::{
     MidiMessage, encode_midi, encode_sync, encode_sync_ump, encode_ump, parse_midi, parse_sync,
     parse_sync_ump, parse_ump,
 };
 pub use patchbay::{Direction, LinkWish, MidiEndpoint, Patchbay};
+pub use smf::{SmfError, SmfFile, SmfTrack, read_smf, write_smf};
 
 /// The PipeWire error type, surfaced from setup and connection.
 pub use pipewire::Error;
