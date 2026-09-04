@@ -300,6 +300,48 @@ came back around at exactly one control per second. 20 sources listed beside 20 
 keyed identically across the two — which is why a shell must keep its saved source settings in a
 map of their own.
 
+### `io/` patchbay: audio as well, and where the speakers are
+
+The patchbay routed notes and only notes, so a shell that made *sound* could not reach the
+speakers. Composition Tutor found the hard edge of that: pressing play produced a node with two
+audio outputs hanging in the graph and nothing on the other end.
+
+First we tried to make it someone else's problem — `node.autoconnect` plus a `media.class` on the
+client, letting the session manager do it. That does not work and cannot: `io/client.rs` builds a
+`pw_filter`, and WirePlumber's `si-audio-adapter` refuses one with *no usable format found*,
+because a DSP filter has no format to negotiate. The attempt was reverted rather than left half
+standing. Routing is this module's job, and it was already doing it for the other port type.
+
+- **`MidiEndpoint` became `Endpoint`, with a `PortKind`.** The two would have been field-for-field
+  identical, which is the same argument that merged `MidiDestination` and `MidiSource` in the
+  previous increment. `destinations`/`sources` now take the kind rather than returning a mixed
+  list: a menu of MIDI outputs with a sound card's left channel in it is a menu with a bug in it.
+- **A wish carries its kind.** `midi_out` / `midi_in` / `audio_out` / `audio_in` replace
+  `to_destination` / `from_source`, and each names exactly the port family it links. Without the
+  kind in `LinkWish`'s identity, a wish for `audio_out_0` would silently take the map slot of one
+  for `midi_out_0` — the same trap direction fell into last time.
+- **`Endpoint::channel` carries the audio channel position.** Port order does not say which side
+  is left: a card enumerates its channels however its driver did. `FL`/`FR` does.
+- **`default_sink` reports the session manager's default sink**, read from the `default` metadata
+  object and answered as a node id. This is the one place the module comes close to policy, and it
+  stays on the right side of the line: it reports a fact the system already keeps rather than
+  ranking anything. Without it every shell has to put a device menu in front of its first sound,
+  and a menu is the wrong first question for someone who pressed play. A node id and not a key,
+  because it answers what is true now — a shell that saves it has saved the wrong thing.
+
+**Breaking change.** Sparkle1080 uses `MidiEndpoint`, `destinations()`, `sources()` and the two
+old constructors; those five call sites were updated in the same breath.
+
+**Done when:** a shell with two audio outputs and no user intervention comes up connected to
+whatever the machine calls its speakers, and a shell that routes MIDI still routes exactly what it
+did before.
+
+*Verified* on PipeWire 1.6.8 against an RME Fireface 400: with the graph cleared of every
+hand-made link, Composition Tutor's `audio_out_0`/`audio_out_1` came up on the default sink's
+`playback_AUX0`/`AUX1` — a card that names its channels `AUX0…AUX17` and never `FL`/`FR`, so it
+went through the numeric fallback and not the easy path. Twelve seconds of music recorded off that
+self-made link at peak 0.23, then the release tail and silence.
+
 ### `io/` standard MIDI files — the other edge
 
 The core could reach a wire and not a file. Every shell that wants to import a corpus or export
